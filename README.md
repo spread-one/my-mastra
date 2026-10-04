@@ -1,8 +1,8 @@
 # my-mastra
 
-공개 웹만 다루는 **독립 TypeScript ESM Mastra 에이전트**입니다. 로컬 터미널에서 DeepSeek와 대화하고, 필요할 때 `web_search` / `web_fetch` 두 도구만 사용합니다.
+공개 웹 도구와 제공된 대화 맥락을 참고하는 **독립 TypeScript ESM Mastra 에이전트**입니다. 로컬 터미널 또는 Slack 멘션/DM에서 DeepSeek와 대화하고, 필요할 때 `web_search` / `web_fetch` 두 도구만 사용합니다.
 
-shookie의 에이전트 파일 분리 방식과 범용 웹 전송·Exa 프로토콜 구현을 바탕으로 필요한 부분만 독립시켰습니다. shookie 런타임, 내부 프롬프트·설정·리소스, 사내 API, Slack, GitHub 저장소 복제, 데이터베이스 어댑터, 서버·인증, 지속 메모리는 포함하지 않습니다. npm 패키지 배포는 하지 않으며 저장소를 복제해 사용합니다.
+shookie의 에이전트 파일 분리 방식, 범용 웹 전송·Exa 프로토콜 및 안전한 Slack 스레드 맥락/동시 실행 경계를 바탕으로 필요한 부분만 독립시켰습니다. 조직 전용 프롬프트·설정·리소스, 사내 API, GitHub 저장소 복제, 데이터베이스 어댑터, OAuth 서버, 지속 메모리는 포함하지 않습니다. npm 패키지 배포는 하지 않으며 저장소를 복제해 사용합니다.
 
 ## 빠른 시작
 
@@ -20,7 +20,7 @@ npm run build
 npm start
 ```
 
-`.env.example`의 `your-deepseek-api-key`는 예시일 뿐이며 그대로 실행하면 친절한 설정 오류를 반환합니다. `.env`는 CLI에서만 읽고, 기존 프로세스 환경 변수가 우선합니다. 키 없이도 설치·타입 검사·빌드·모든 테스트·`--help`는 가능합니다.
+`.env.example`의 `your-deepseek-api-key`는 예시일 뿐이며 그대로 실행하면 친절한 설정 오류를 반환합니다. `.env`는 CLI/Slack의 실행 entry에서만 읽고, 기존 프로세스 환경 변수가 우선합니다. 키 없이도 설치·타입 검사·빌드·모든 테스트·`--help`는 가능합니다.
 
 | 변수 | 필수 | 기본값 / 용도 |
 | --- | --- | --- |
@@ -58,6 +58,25 @@ printf '첫 질문\n두 번째 질문\n/exit\n' | npm start
 - Mastra Core의 기본 내부 `in-memory` store는 비영속적이며 이 프로젝트는 Agent Memory·외부 storage 어댑터를 등록하지 않습니다. Studio/HTTP 서버를 실행하지 않습니다.
 - Core가 전이 의존성으로 포함하는 선택적 사용 통계 기능도 사용하지 않습니다. 에이전트 팩토리를 호출하면 프로세스의 `MASTRA_TELEMETRY_DISABLED=true`를 강제로 설정합니다(같은 프로세스의 다른 Mastra 인스턴스에도 적용). 별도 설정이나 키가 필요 없으며 라이브러리 import만으로는 환경을 변경하지 않습니다.
 - 응답의 터미널 제어문자는 제거하지만, 모델 응답을 shell 명령으로 실행하지 마세요.
+
+## Slack 사용
+
+일반 Slack 봇의 Socket Mode로 채널 `app_mention`과 사람의 DM(`message.im`)에 완성 응답을 원래 스레드로 보냅니다. CLI와 별도 실행 모드이며 **기존 CLI에는 Slack 키가 필요하지 않습니다.**
+
+```sh
+# .env에 DEEPSEEK_API_KEY, SLACK_BOT_TOKEN(xoxb-), SLACK_APP_TOKEN(xapp-) 설정 후
+npm run build
+npm run start:slack
+# 개발: npm run dev:slack
+# 도움말은 키 없이 사용 가능
+npm run start:slack -- --help
+```
+
+**실제 설치 절차·권한·개인정보·한도는 [docs/slack.md](docs/slack.md), 생성용 manifest는 [docs/slack-manifest.json](docs/slack-manifest.json)을 반드시 참고하세요.** App-level token에 `connections:write`, bot에 이벤트/history/게시 권한, 채널 초대와 권한 변경 후 재설치가 필요합니다. bot token의 채널 `conversations.replies` 지원은 실제 설치에서 확인해야 하며 실패/부분조회 시 답변 모델을 실행하지 않습니다.
+
+기존 스레드 원문은 신뢰된 이벤트 대상만 전 페이지 조회합니다. 48,000 UTF-8 byte를 넘으면 같은 모델로 도구 없이 오래된 모든 댓글을 순차 요약하고 root/최근 원문/현재 입력을 보존합니다. DM만 team/channel/thread별 bounded process-memory 최근 대화를 사용합니다. 큐·중복 억제·동시 실행·요청 기한과 안전한 plain-text blocks 출력을 갖추지만 **무영속·단일 프로세스**이며 재시작/TTL 밖 중복은 보장하지 않습니다.
+
+**Slack 데이터는 DeepSeek로 전송됩니다.** 비밀을 Slack/외부 검색에 입력하지 마세요. 실제 Slack/LLM E2E·앱 설정 변경·배포는 실행하지 않았고 설치 후 별도 검증이 필요합니다.
 
 ## 두 웹 도구
 
@@ -116,7 +135,13 @@ src/
     tools.ts                  # 입력/출력 스키마, 추출, Exa 경로
   chat.ts                     # 생성 옵션 / 비영속 CLI 대화 제한
   cli/run.ts                  # 테스트 가능한 CLI
-  cli.ts                      # .env 로딩과 실행 진입점
+  cli.ts                      # CLI .env 로딩과 실행 진입점
+  slack.ts                    # Slack 전용 .env 로딩과 signal/종료 entry
+  slack/
+    config.ts / run.ts        # xoxb/xapp 검증, Bolt Socket Mode 수명주기
+    handlers.ts / runtime.ts  # 수신/게시, dedupe/직렬 큐/DM bounded memory
+    context.ts / model.ts     # authoritative thread/byte budget/도구 없는 요약
+    format.ts / limits.ts     # 안전한 plain-text blocks / 운영 한도
 ```
 
 라이브러리 import는 `.env`를 읽거나 모델/네트워크를 초기화하지 않습니다. 호출 시 환경을 명시하거나, 호출자에서 `dotenv/config`를 로딩하세요.
@@ -144,9 +169,12 @@ npm run typecheck
 npm test
 npm run build
 node dist/cli.js --help
+node dist/slack.js --help
 npm audit --omit=dev
 ```
 
 테스트는 DNS/HTTP와 DeepSeek 응답을 모의 처리하므로 실제 키나 외부 서비스가 필요하지 않습니다. URL/IP 차단 코퍼스, 혼합 DNS·재바인딩 고정, 리다이렉트·키 분리, 타임아웃·압축 해제 크기 제한, MIME/추출, Exa REST/MCP 실패 폐쇄, 환경 검증, 실제 Mastra+DeepSeek SDK 도구 호출 루프, CLI 인자·오류·취소·대화 제한을 검증합니다. 소켓 고정 테스트 1개는 테스트 전용 루프백 HTTP 서버를 사용하며 실제 공개 요청은 하지 않습니다. GitHub Actions도 Node 24에서 비밀 없이 설치·타입 검사·테스트·빌드를 수행합니다.
+
+Slack 합성 테스트는 pagination/root/current/역할/48000 byte/순차 요약 실패 폐쇄, handler 연결, 중복·직렬 큐·DM 격리·메모리 한도·기한/종료·비밀 없는 오류·안전 출력 한도를 검증합니다. 실제 Slack 설치/권한/채널 조회/출력과 실제 LLM E2E는 실행하지 않습니다.
 
 실제 공급자 품질/과금/가용성은 모의 테스트의 검증 범위가 아닙니다. 의존성 업데이트 후 잠금 파일과 전체 테스트를 함께 갱신하세요.
