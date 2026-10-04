@@ -1,0 +1,31 @@
+{
+  "name": "my-mastra",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Standalone public-web Mastra agent with a local DeepSeek CLI",
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "exports": { ".": "./dist/index.js" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
+    "start": "node dist/cli.js",
+    "dev": "tsx src/cli.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@ai-sdk/deepseek": "2.0.71",
+    "@mastra/core": "1.74.0",
+    "@mozilla/readability": "^0.6.0",
+    "dotenv": "^16.6.1",
+    "ipaddr.js": "^2.2.0",
+    "linkedom": "0.18.12",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0",
+    "vitest": "^5.0.3"
+  }
+}
