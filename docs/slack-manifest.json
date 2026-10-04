@@ -1,0 +1,22 @@
+{
+  "display_information": {
+    "name": "my-mastra",
+    "description": "DeepSeek 공개 웹 도우미 — 멘션 및 DM",
+    "background_color": "#2c3e50"
+  },
+  "features": {
+    "app_home": { "messages_tab_enabled": true, "messages_tab_read_only_enabled": false },
+    "bot_user": { "display_name": "my-mastra", "always_online": false }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": ["app_mentions:read", "chat:write", "im:history", "channels:history", "groups:history"]
+    }
+  },
+  "settings": {
+    "event_subscriptions": { "bot_events": ["app_mention", "message.im"] },
+    "socket_mode_enabled": true,
+    "org_deploy_enabled": false,
+    "token_rotation_enabled": false
+  }
+}
