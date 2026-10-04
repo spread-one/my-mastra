@@ -20,3 +20,47 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: node dist/cli.js --help
+      - run: node dist/slack.js --help
+      - run: npm run test:deployment
+  publish:
+    needs: check
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'spread-one/my-mastra'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish full SHA (no latest tag, no secret build arguments or remote caches)
+        id: image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/spread-one/my-mastra:sha-${{ github.sha }}
+          build-args: |
+            VCS_REF=${{ github.sha }}
+            SOURCE_URL=https://github.com/spread-one/my-mastra
+          labels: |
+            org.opencontainers.image.source=https://github.com/spread-one/my-mastra
+            org.opencontainers.image.revision=${{ github.sha }}
+          provenance: mode=min
+      - name: Verify published provenance and record digest
+        env:
+          SHA: ${{ github.sha }}
+          DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ && "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          IMAGE="ghcr.io/spread-one/my-mastra@$DIGEST"
+          docker pull --platform linux/amd64 "$IMAGE"
+          test "$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE")" = "$SHA"
+          test "$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.source" }}' "$IMAGE")" = 'https://github.com/spread-one/my-mastra'
+          printf 'Published main `%s`\n\n`%s` (linux/amd64)\n' "$SHA" "$IMAGE" >> "$GITHUB_STEP_SUMMARY"
