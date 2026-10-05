@@ -80,15 +80,14 @@ npm run start:slack -- --help
 
 ## SamKim self-host 자동 배포
 
-공개 저장소에는 self-hosted runner를 등록하지 않습니다. PR/main의 GitHub-hosted CI 성공 뒤 **main push만** `ghcr.io/spread-one/my-mastra:sha-<40자리 SHA>` linux/amd64 이미지를 발행합니다. 서버의 systemd timer는 공개 main/image를 약1분마다 익명 조회하고 source/revision 라벨을 확인한 **digest-pinned Compose**로 앱 `bot`만 교체합니다. Slack 시작 완료·실제 Socket 연결 health·zero restart 안정화 뒤 성공 상태를 기록하고, 실패하면 이전 healthy digest/env snapshot을 복구합니다.
+공개 저장소에는 self-hosted runner를 등록하지 않습니다. **빌드는 GitHub-hosted Actions에서만** 하고 서버에서는 build하지 않습니다. PR/main CI 성공 뒤 **main push만** full-SHA linux/amd64 GHCR image를 발행하고, ephemeral tagged Tailscale OAuth → native Tailscale SSH → `samkim-deploy`의 고정 root-owned narrow sudo wrapper로 **explicit SHA/digest-pinned Compose**의 `bot`만 교체합니다. 실제 Slack 연결 readiness/zero restart 안정화 또는 rollback 결과가 remote exit status로 Actions deploy job에 반영됩니다. polling/systemd timer는 없습니다.
 
-**설치·GHCR 공개 전환·host-only 키·rollback/disable/update 명령·WSL 운영 한계는 [docs/selfhost-deployment.md](docs/selfhost-deployment.md)를 참고하세요.** GHCR package Public 설정과 실제 DeepSeek/Slack 키는 owner가 준비해야 합니다. DeepSeek 키가 없거나 image/네트워크가 준비되지 않으면 배포를 차단하고 기존 봇을 유지합니다. 외부 포트/SSH/Tailscale/Windows 자동기동은 변경하지 않습니다. 원격 적용과 Slack live 검증은 별도입니다.
+**최소권한 인증·관리자 SSH 보존·GHCR Public 전환·host-only 키·retention/rollback/중지/업데이트·WSL 한계는 [docs/selfhost-deployment.md](docs/selfhost-deployment.md)를 참고하세요.** CI OS user는 Docker 그룹/일반 sudo 권한이 없고 wrapper의 두 검증된 argv만 허용합니다. local current/rollback + 최근 성공3 digest를 보호하며 앱 소유/미참조 이미지에만 non-force cleanup합니다. 별도 GHCR 자동 cleanup은 최근10 SHA roots +24h grace와 foreign/unknown graph를 보호하는 root-first best-effort이며 strict finite 개수 보장은 아닙니다. 실제 OAuth/vars/tag/ACL/account/bootstrap 준비 전에는 live deploy가 blocked이며 실제 Slack E2E 성공을 주장하지 않습니다. 외부 포트/일반 sshd/SSH key/hostkey bypass/전역 prune은 추가하지 않습니다.
 
 ```sh
-npm run test:deployment  # shell syntax + secret 없는 fake Docker/Git/설치/보안 계약 fixtures
-# 로컬 Docker가 있을 때만 (실제 키/Slack 연결 불필요)
-docker build --platform linux/amd64 --build-arg VCS_REF="$(git rev-parse HEAD)" -t my-mastra:selfhost-smoke .
-bash deploy/smoke.sh my-mastra:selfhost-smoke
+npm run test:deployment  # fake Docker/Git/인증 argv-env/retention/설치/보안 계약
+# 필요 시 Actions-built image만 smoke (빌드/실제 Slack 연결 없음)
+bash deploy/smoke.sh ghcr.io/spread-one/my-mastra:sha-FULL_MAIN_SHA
 ```
 
 ## 두 웹 도구

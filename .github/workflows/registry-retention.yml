@@ -1,0 +1,33 @@
+name: 앱 GHCR retention (배포 결과와 독립)
+on:
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  cleanup:
+    if: github.repository == 'spread-one/my-mastra' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: samkim-ghcr-mutation
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Root-first app-only graph-aware best-effort cleanup
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RETENTION_REPORT: ${{ runner.temp }}/samkim-retention.json
+        run: python3 deploy/registry_cleanup.py
+      - name: Preserve nonsecret plan and confirmed deletion report even on deferral
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: samkim-retention-${{ github.run_id }}
+          path: ${{ runner.temp }}/samkim-retention.json
+          retention-days: 14
+          if-no-files-found: warn

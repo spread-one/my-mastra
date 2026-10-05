@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Host-only anonymous main/SHA poller. Never source env files or render Compose config."""
+"""Explicit SHA/digest deployment invoked by an authenticated fixed wrapper; no host build."""
 import argparse
 import fcntl
 import json
@@ -17,6 +17,7 @@ SOURCE = 'https://github.com/spread-one/my-mastra'
 IMAGE = 'ghcr.io/spread-one/my-mastra'
 SHA = re.compile(r'[0-9a-f]{40}')
 DIGEST = re.compile(re.escape(IMAGE) + r'@sha256:[0-9a-f]{64}')
+EXECUTABLES = {'git': '/usr/bin/git', 'docker': '/usr/bin/docker'}
 ENV_KEYS = {'DEEPSEEK_API_KEY', 'DEEPSEEK_MODEL', 'EXA_API_KEY', 'SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN'}
 
 
@@ -98,7 +99,7 @@ def valid_record(record):
 class Deployer:
     def __init__(self, command_env=None):
         self.command_env = command_env or os.environ.copy()
-        # Hard overall command budget, leaving systemd time to terminate hung Python too.
+        # Overall deploy budget; the fixed wrapper also bounds process lifetime.
         self.deadline = time.monotonic() + 240
         self.changed = False
         self.old = None
@@ -108,8 +109,11 @@ class Deployer:
         seconds = min(seconds, self.deadline - time.monotonic())
         if seconds <= 0:
             raise Failed('deployment_timeout')
+        if not args or args[0] not in EXECUTABLES:
+            raise Failed('command_not_allowed')
+        args = [EXECUTABLES[args[0]], *args[1:]]
         try:
-            result = subprocess.run(args, capture_output=True, text=True, timeout=seconds, env=self.command_env)
+            result = subprocess.run(args, capture_output=True, text=True, timeout=seconds, env=self.command_env, cwd='/')
             if result.returncode:
                 raise Failed('command_failed')
             return result.stdout.strip()
@@ -142,6 +146,10 @@ class Deployer:
             if info.get('Os') != 'linux' or info.get('Architecture') != 'amd64':
                 raise Failed('image_platform_invalid')
             digests = [digest for digest in info.get('RepoDigests', []) if DIGEST.fullmatch(digest)]
+            if DIGEST.fullmatch(ref):
+                if ref not in digests:
+                    raise Failed('image_digest_invalid')
+                return ref
             if len(digests) != 1:
                 raise Failed('image_digest_invalid')
             return digests[0]
@@ -181,7 +189,14 @@ class Deployer:
     def save_success(self, record, previous):
         # deployed.json is the single commit point; no fallible operation follows within this method.
         atomic(APP / 'state' / 'status.json', {'status': 'healthy', 'sha': record['sha'], 'digest': record['digest']})
-        atomic(APP / 'state' / 'deployed.json', {**record, 'previous': previous})
+        path = APP / 'state' / 'deployed.json'
+        old = read_json(path) if path.exists() else {}
+        history = []
+        for item in [record, *old.get('history', []), *([previous] if previous else [])]:
+            valid_record(item)
+            if item['digest'] not in {entry['digest'] for entry in history}:
+                history.append({key: item[key] for key in ('sha', 'digest', 'snapshot')})
+        atomic(path, {**record, 'previous': previous, 'history': history[:3]})
 
     def clean_snapshots(self):
         state_path = APP / 'state' / 'deployed.json'
@@ -191,6 +206,7 @@ class Deployer:
             keep.add(valid_record(state)['snapshot'])
             if state.get('previous'):
                 keep.add(valid_record(state['previous'])['snapshot'])
+            keep.update(valid_record(item)['snapshot'] for item in state.get('history', []))
         # Only our private app snapshots, never Docker images or other apps' files.
         for path in (APP / 'state').glob('env-*'):
             if path.name not in keep:
@@ -226,7 +242,9 @@ class Deployer:
         pending.unlink()
         return 'rolled_back' if old else 'failed_initial_no_rollback'
 
-    def run(self, force=False, rollback=False):
+    def run(self, sha=None, digest=None, force=False, rollback=False):
+        if not rollback and (not isinstance(sha, str) or not SHA.fullmatch(sha) or not isinstance(digest, str) or not DIGEST.fullmatch(digest)):
+            raise Failed('candidate_invalid')
         self.recover()
         state_path = APP / 'state' / 'deployed.json'
         state = read_json(state_path) if state_path.exists() else None
@@ -240,16 +258,15 @@ class Deployer:
             env_text(APP / 'state' / self.candidate['snapshot'])
             self.inspect_image(self.candidate['digest'], self.candidate['sha'])
         else:
-            # Validate host keys before any pull/replacement. A missing DeepSeek key blocks bootstrap.
+            # Values stay host-only. Actions supplies only the public SHA and immutable digest.
             text = env_text(APP / '.env')
-            sha = self.head()
-            if state and state['sha'] == sha and not force and self.health(state):
+            if self.head() != sha:
+                raise Failed('candidate_not_main')
+            if state and state['sha'] == sha and state['digest'] == digest and not force and self.health(state):
                 print('deploy unchanged_healthy')
+                self.maintenance()
                 return
-            tag = IMAGE + ':sha-' + sha
-            self.command(['docker', 'pull', '--platform', 'linux/amd64', tag], 80)
-            digest = self.inspect_image(tag, sha)
-            # Verify the digest reference independently of the mutable local tag lookup.
+            self.command(['docker', 'pull', '--platform', 'linux/amd64', digest], 80)
             if self.inspect_image(digest, sha) != digest:
                 raise Failed('image_digest_invalid')
             if self.head() != sha:
@@ -268,10 +285,75 @@ class Deployer:
         self.changed = False  # Commit must never be undone by a later cleanup failure.
         (APP / 'state' / 'pending.json').unlink()
         print('deploy healthy ' + self.candidate['sha'] + ' ' + self.candidate['digest'])
+        self.maintenance()
+
+    def container_images(self):
+        ids = self.command(['docker', 'ps', '-aq', '--no-trunc']).splitlines()
+        images = set()
+        for cid in ids:
+            if not re.fullmatch(r'[0-9a-f]{64}', cid):
+                raise Failed('container_metadata_invalid')
+            image = self.command(['docker', 'inspect', '--format', '{{.Image}}', cid])
+            if not re.fullmatch(r'sha256:[0-9a-f]{64}', image):
+                raise Failed('container_metadata_invalid')
+            images.add(image)
+        return images
+
+    def retain_images(self):
+        # Caller holds the deployment flock; all cleanup is app-specific and non-force.
+        state_path = APP / 'state' / 'deployed.json'
+        state = read_json(state_path)
+        protected = [state, *state.get('history', [])]
+        if state.get('previous'):
+            protected.append(state['previous'])
+        digests = {valid_record(item)['digest'] for item in protected}
+        revisions = {item['sha'] for item in protected}
+        baseline = json.dumps(state, sort_keys=True)
+        ids = set(self.command(['docker', 'image', 'ls', '--no-trunc', '--filter',
+                                'label=org.opencontainers.image.source=' + SOURCE, '--format', '{{.ID}}']).splitlines())
+        for image_id in sorted(ids):
+            if not re.fullmatch(r'sha256:[0-9a-f]{64}', image_id):
+                raise Failed('image_metadata_invalid')
+            info = json.loads(self.command(['docker', 'image', 'inspect', '--format', '{{json .}}', image_id]))
+            labels = info.get('Config', {}).get('Labels') or {}
+            revision = labels.get('org.opencontainers.image.revision', '')
+            refs = info.get('RepoDigests') or []
+            tags = info.get('RepoTags') or []
+            if (info.get('Id') != image_id or labels.get('org.opencontainers.image.source') != SOURCE or not SHA.fullmatch(revision)
+                    or info.get('Os') != 'linux' or info.get('Architecture') != 'amd64'
+                    or not refs or any(not DIGEST.fullmatch(ref) for ref in refs)
+                    or any(not re.fullmatch(re.escape(IMAGE) + ':sha-' + revision, tag) for tag in tags)):
+                continue  # Foreign aliases, unknown provenance, or shared images are never removed.
+            if revision in revisions or digests.intersection(refs):
+                continue
+            if json.dumps(read_json(state_path), sort_keys=True) != baseline:
+                raise Failed('retention_state_changed')
+            if image_id in self.container_images():
+                continue
+            latest = json.loads(self.command(['docker', 'image', 'inspect', '--format', '{{json .}}', image_id]))
+            if latest != info:
+                raise Failed('retention_image_changed')
+            # Recheck all running/stopped containers immediately before deletion. Docker's
+            # non-force removal is the final race guard against newly created containers.
+            if image_id in self.container_images():
+                continue
+            self.command(['docker', 'image', 'rm', image_id])
+
+    def maintenance(self):
+        # A disk/permission/reference race must never turn a healthy deploy into a failed job.
+        if self.deadline - time.monotonic() <= 25:
+            print('deploy retention_deferred')
+            return
+        deadline = self.deadline
+        self.deadline = min(deadline, time.monotonic() + 20)
         try:
             self.clean_snapshots()
-        except (Failed, OSError):
-            print('deploy snapshot_cleanup_deferred')
+            self.retain_images()
+            print('deploy retention_complete')
+        except (Failed, OSError, ValueError, KeyError, TypeError):
+            print('deploy retention_deferred')
+        finally:
+            self.deadline = deadline
 
 
 def prepare():
@@ -291,35 +373,40 @@ def prepare():
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Anonymous main SHA deployer; static sanitized status only')
+    parser = argparse.ArgumentParser(description='Explicit main SHA/digest deployer; static sanitized status only')
+    parser.add_argument('--sha')
+    parser.add_argument('--digest')
     parser.add_argument('--force', action='store_true', help='Redeploy current main, including a changed host .env')
-    parser.add_argument('--rollback', action='store_true', help='Restore previous local healthy digest/env; disable timer first')
+    parser.add_argument('--rollback', action='store_true', help='Root operator only: restore previous local healthy digest/env' )
     args = parser.parse_args()
+    if not args.rollback and (not args.sha or not SHA.fullmatch(args.sha) or not args.digest or not DIGEST.fullmatch(args.digest)):
+        print('deploy candidate_invalid')
+        return 1
     os.umask(0o077)
     deployer = None
     try:
         prepare()
-        # All poll/manual/recovery paths share a persistent inode. Never unlink this lock.
+        # All Actions/manual/recovery paths share a persistent inode. Never unlink this lock.
         lock_path = APP / 'deploy.lock'
         fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, 'w') as lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
-                print('deploy locked_skip')
-                return 0
+                print('deploy locked_busy')
+                return 1
             with tempfile.TemporaryDirectory(prefix='my-mastra-docker-') as config:
                 env = {key: value for key, value in os.environ.items()
                        if not key.startswith(('COMPOSE_', 'DOCKER_', 'GIT_')) and key not in ENV_KEYS | {'BOT_IMAGE', 'SLACK_HEALTH_FILE'}}
                 env.update(HOME=config, DOCKER_CONFIG=config, DOCKER_HOST='unix:///var/run/docker.sock',
                            GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null', GIT_TERMINAL_PROMPT='0')
                 deployer = Deployer(env)
-                # Graceful service stop attempts rollback under the same lock; hard kills recover next poll.
+                # Interruptions attempt rollback under the same lock; hard kills recover next invocation.
                 def terminated(_signum, _frame):
                     raise Failed('deployment_interrupted')
                 signal.signal(signal.SIGTERM, terminated)
                 try:
-                    deployer.run(args.force, args.rollback)
+                    deployer.run(args.sha, args.digest, args.force, args.rollback)
                 except (Failed, OSError, ValueError, KeyError, TypeError) as error:
                     # Failed messages are fixed codes authored here, never SDK/subprocess output.
                     code = str(error) if isinstance(error, Failed) else 'host_operation_failed'

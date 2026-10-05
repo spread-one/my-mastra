@@ -1,0 +1,19 @@
+// FRAGMENT ONLY. Do not overwrite the existing tailnet policy with this file.
+// BEFORE server tagging: preserve/test an explicit existing administrator Mac ->
+// tag:samkim-server SSH rule. autogroup:self may stop matching a tagged target.
+// Replace ADMIN_IDENTITY / ADMIN_OS_USER with owner-approved existing identities.
+// Audit broad existing grants/SSH rules: permissions are additive, not deny rules.
+{
+  "tagOwners": {
+    "tag:samkim-ci": ["autogroup:admin"],
+    "tag:samkim-server": ["autogroup:admin"],
+  },
+  "grants": [
+    {"src": ["tag:samkim-ci"], "dst": ["tag:samkim-server"], "ip": ["tcp:22"]},
+    {"src": ["ADMIN_IDENTITY"], "dst": ["tag:samkim-server"], "ip": ["tcp:22"]},
+  ],
+  "ssh": [
+    {"action": "accept", "src": ["tag:samkim-ci"], "dst": ["tag:samkim-server"], "users": ["samkim-deploy"]},
+    {"action": "check", "src": ["ADMIN_IDENTITY"], "dst": ["tag:samkim-server"], "users": ["ADMIN_OS_USER"], "checkPeriod": "12h"},
+  ],
+}

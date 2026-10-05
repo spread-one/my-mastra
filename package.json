@@ -14,7 +14,7 @@
     "start:slack": "node dist/slack.js",
     "dev:slack": "tsx src/slack.ts",
     "test": "vitest run",
-    "test:deployment": "bash -n deploy/install.sh deploy/smoke.sh && python3 -m unittest discover -s deploy -p 'test_*.py'"
+    "test:deployment": "bash -n deploy/install.sh deploy/smoke.sh deploy/ci-deploy.sh && sh -n deploy/samkim-deploy && python3 -m unittest discover -s deploy -p 'test_*.py'"
   },
   "dependencies": {
     "@ai-sdk/deepseek": "2.0.71",

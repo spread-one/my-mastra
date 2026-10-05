@@ -48,8 +48,13 @@ class Fake(d.Deployer):
         self.fail_rollback = False
         self.stopped = False
 
+    def run(self, sha=SHA_B, digest=DIGEST_B, force=False, rollback=False):
+        return super().run(sha, digest, force, rollback)
+
     def command(self, args, seconds=20):
         self.commands.append(args)
+        if args[1:3] == ['image', 'ls']:
+            return ''
         if args[0] == 'git':
             if self.fail_network:
                 raise d.Failed('command_failed')
@@ -173,7 +178,7 @@ class DeployTests(unittest.TestCase):
             with self.assertRaises(d.Failed):
                 self.fake.run()
             self.fake.labels = previous
-        for digests in [[], [d.IMAGE + '@sha256:abc'], ['other/image@sha256:' + 'a' * 64], [DIGEST_A, DIGEST_B]]:
+        for digests in [[], [d.IMAGE + '@sha256:abc'], ['other/image@sha256:' + 'a' * 64], [DIGEST_A, DIGEST_A]]:
             self.fake.digests = digests
             with self.assertRaises(d.Failed):
                 self.fake.run()
@@ -205,8 +210,10 @@ class DeployTests(unittest.TestCase):
         self.existing()
         d.atomic(self.app / '.env', ENV.replace('synthetic-key', 'changed-synthetic'))
         self.fake.fail_candidate = True
-        with self.assertRaisesRegex(d.Failed, 'readiness_failed'):
-            self.fake.run()
+        with patch.object(self.fake, 'maintenance') as maintenance:
+            with self.assertRaisesRegex(d.Failed, 'readiness_failed'):
+                self.fake.run()
+            maintenance.assert_not_called()
         self.fake.recover()
         self.assertEqual(self.fake.running, DIGEST_A)
         self.assertEqual((self.app / '.env.runtime').read_text(), d.env_text(self.app / 'state/env-old'))
@@ -266,9 +273,9 @@ class DeployTests(unittest.TestCase):
         lock = open(self.app / 'deploy.lock', 'w')
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            result = subprocess.run(['python3', str(ROOT / 'deploy/deploy.py')], env={**os.environ, 'APP_DIR': str(self.app)}, capture_output=True, text=True, timeout=5)
-            self.assertEqual(result.returncode, 0)
-            self.assertIn('locked_skip', result.stdout)
+            result = subprocess.run(['python3', str(ROOT / 'deploy/deploy.py'), '--sha', SHA_B, '--digest', DIGEST_B], env={**os.environ, 'APP_DIR': str(self.app)}, capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn('locked_busy', result.stdout)
         finally:
             lock.close()
         for root in ['/', '/tmp', str(self.app / '..'), 'relative']:
@@ -283,7 +290,7 @@ class DeployTests(unittest.TestCase):
         self.existing()
         self.fake.fail_candidate = True
         output = io.StringIO()
-        with patch.object(d, 'Deployer', lambda _env: self.fake), patch('sys.argv', ['deploy.py']), contextlib.redirect_stdout(output):
+        with patch.object(d, 'Deployer', lambda _env: self.fake), patch('sys.argv', ['deploy.py', '--sha', SHA_B, '--digest', DIGEST_B]), contextlib.redirect_stdout(output):
             self.assertEqual(d.main(), 1)
         self.assertIn('failed_rollback_confirmed', output.getvalue())
         self.assertNotIn('synthetic', output.getvalue())
@@ -318,14 +325,18 @@ path.write_text(json.dumps(state))
         for name in ('git', 'docker'):
             (tools / name).write_text(binary)
             (tools / name).chmod(0o700)
-        env = {**os.environ, 'APP_DIR': str(self.app), 'FIXTURE_STATE': str(fixture_state), 'PATH': str(tools) + os.pathsep + os.environ['PATH']}
-        result = subprocess.run(['python3', str(ROOT / 'deploy/deploy.py')], env=env, capture_output=True, text=True, timeout=25)
+        # Production uses absolute trusted binaries. This test-only loader swaps constants,
+        # never adds a production environment/executable override escape hatch.
+        runner = tools / 'runner.py'
+        runner.write_text('import importlib.util\nfrom pathlib import Path\nspec=importlib.util.spec_from_file_location("fixture_deploy", ' + repr(str(ROOT / 'deploy/deploy.py')) + ')\nd=importlib.util.module_from_spec(spec)\nspec.loader.exec_module(d)\nd.EXECUTABLES={"git": ' + repr(str(tools / 'git')) + ', "docker": ' + repr(str(tools / 'docker')) + '}\nraise SystemExit(d.main())\n')
+        env = {**os.environ, 'APP_DIR': str(self.app), 'FIXTURE_STATE': str(fixture_state)}
+        result = subprocess.run(['python3', str(runner), '--sha', SHA_B, '--digest', DIGEST_B], env=env, capture_output=True, text=True, timeout=25)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.state()['digest'], DIGEST_B)
         self.assertNotIn('synthetic', result.stdout + result.stderr)
         for command in json.loads(fixture_state.read_text())['commands']:
             self.assertFalse(any(word in command for word in ('down', 'prune', 'reset', 'config')))
-        result = subprocess.run(['python3', str(ROOT / 'deploy/deploy.py')], env=env, capture_output=True, text=True, timeout=5)
+        result = subprocess.run(['python3', str(runner), '--sha', SHA_B, '--digest', DIGEST_B], env=env, capture_output=True, text=True, timeout=5)
         self.assertEqual(result.returncode, 0)
         self.assertIn('unchanged_healthy', result.stdout)
 
@@ -338,7 +349,7 @@ path.write_text(json.dumps(state))
                 failed = True
                 raise OSError('synthetic private detail')
             original_atomic(path, value)
-        with patch.object(d, 'atomic', interrupt_config), patch.object(d, 'Deployer', lambda _env: self.fake), patch('sys.argv', ['deploy.py']), contextlib.redirect_stdout(io.StringIO()) as output:
+        with patch.object(d, 'atomic', interrupt_config), patch.object(d, 'Deployer', lambda _env: self.fake), patch('sys.argv', ['deploy.py', '--sha', SHA_B, '--digest', DIGEST_B]), contextlib.redirect_stdout(io.StringIO()) as output:
             self.assertEqual(d.main(), 1)
         self.assertNotIn('private detail', output.getvalue())
         self.assertIn('failed_initial_no_rollback', output.getvalue())
@@ -349,7 +360,7 @@ path.write_text(json.dumps(state))
             original_atomic(path, value)
             if path.name == 'deployed.json':
                 raise OSError('synthetic disk failure after replace')
-        with patch.object(d, 'atomic', interrupt_commit), patch.object(d, 'Deployer', lambda _env: self.fake), patch('sys.argv', ['deploy.py']), contextlib.redirect_stdout(io.StringIO()) as output:
+        with patch.object(d, 'atomic', interrupt_commit), patch.object(d, 'Deployer', lambda _env: self.fake), patch('sys.argv', ['deploy.py', '--sha', SHA_B, '--digest', DIGEST_B]), contextlib.redirect_stdout(io.StringIO()) as output:
             self.assertEqual(d.main(), 1)
         self.assertEqual(self.state()['sha'], SHA_B)
         self.assertEqual(self.fake.running, DIGEST_B)
@@ -364,7 +375,7 @@ path.write_text(json.dumps(state))
         def factory(env):
             captured.append(env)
             return original(env)
-        with patch.object(d, 'Deployer', factory), patch.dict(os.environ, {'DOCKER_AUTH_CONFIG': 'private', 'BOT_IMAGE': 'evil', 'COMPOSE_FILE': 'evil', 'GIT_SSH_COMMAND': 'evil', 'DEEPSEEK_API_KEY': 'synthetic-private'}), patch('sys.argv', ['deploy.py']), contextlib.redirect_stdout(io.StringIO()):
+        with patch.object(d, 'Deployer', factory), patch.dict(os.environ, {'DOCKER_AUTH_CONFIG': 'private', 'BOT_IMAGE': 'evil', 'COMPOSE_FILE': 'evil', 'GIT_SSH_COMMAND': 'evil', 'DEEPSEEK_API_KEY': 'synthetic-private'}), patch('sys.argv', ['deploy.py', '--sha', SHA_B, '--digest', DIGEST_B]), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(d.main(), 1)
         env = captured[0]
         self.assertNotIn('DOCKER_AUTH_CONFIG', env)
@@ -379,7 +390,7 @@ path.write_text(json.dumps(state))
 
 
 class InstallAndContracts(unittest.TestCase):
-    def test_staged_install_preserves_secrets_state_and_never_starts_units(self):
+    def test_staged_install_preserves_secrets_state_and_never_starts_app(self):
         with tempfile.TemporaryDirectory() as stage:
             stage = str(Path(stage).resolve())
             app = Path(stage + '/srv/selfhost/apps/my-mastra')
@@ -391,22 +402,24 @@ class InstallAndContracts(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual((app / '.env').read_text(), ENV)
             self.assertEqual((app / 'state/existing').read_text(), 'keep')
-            unit = (Path(stage) / 'etc/systemd/system/my-mastra-deploy.service').read_text()
-            self.assertIn('ExecStart=/usr/bin/python3 /srv/selfhost/apps/my-mastra/deploy.py', unit)
-            self.assertNotIn('@APP_DIR@', unit)
-            self.assertIn('timer_not_started', result.stdout)
+            wrapper = (Path(stage) / 'usr/local/sbin/samkim-deploy').read_text()
+            self.assertIn('/usr/bin/python3 -I /srv/selfhost/apps/my-mastra/deploy.py', wrapper)
+            sudoers = Path(stage) / 'etc/sudoers.d/samkim-deploy'
+            self.assertEqual(stat.S_IMODE(sudoers.stat().st_mode), 0o440)
+            self.assertIn('NOSETENV: /usr/local/sbin/samkim-deploy', sudoers.read_text())
+            self.assertIn('app_not_started', result.stdout)
+            self.assertFalse((Path(stage) / 'etc/systemd').exists())
 
     def test_install_custom_app_dir_and_symlink_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             stage = str(Path(directory).resolve())
             result = subprocess.run(['bash', str(ROOT / 'deploy/install.sh'), '--stage', stage], env={**os.environ, 'APP_DIR': '/srv/selfhost/apps/custom-bot'}, capture_output=True, text=True, timeout=5)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            unit = (Path(stage) / 'etc/systemd/system/my-mastra-deploy.service').read_text()
-            self.assertIn('Environment=APP_DIR=/srv/selfhost/apps/custom-bot', unit)
-            app = Path(stage) / 'srv/selfhost/apps/custom-bot'
-            (app / 'deploy.py').unlink()
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('fixed_path_required', result.stdout)
+            app = Path(stage) / 'srv/selfhost/apps/my-mastra'
+            app.mkdir(parents=True, mode=0o700)
             (app / 'deploy.py').symlink_to(app / 'compose.yaml')
-            result = subprocess.run(['bash', str(ROOT / 'deploy/install.sh'), '--stage', stage], env={**os.environ, 'APP_DIR': '/srv/selfhost/apps/custom-bot'}, capture_output=True, text=True, timeout=5)
+            result = subprocess.run(['bash', str(ROOT / 'deploy/install.sh'), '--stage', stage], env={**os.environ, 'APP_DIR': '/srv/selfhost/apps/my-mastra'}, capture_output=True, text=True, timeout=5)
             self.assertNotEqual(result.returncode, 0)
 
     def test_workflow_only_trusted_main_publishes_after_hosted_check(self):
@@ -445,11 +458,12 @@ class InstallAndContracts(unittest.TestCase):
             self.assertIn(value, compose)
         self.assertNotIn('ports:', compose)
         self.assertNotIn('docker.sock', compose)
-        service = (ROOT / 'deploy/my-mastra-deploy.service').read_text()
-        self.assertIn('TimeoutStartSec=360', service)
-        self.assertIn('After=network-online.target docker.service', service)
-        timer = (ROOT / 'deploy/my-mastra-deploy.timer').read_text()
-        self.assertIn('OnUnitInactiveSec=60s', timer)
+        self.assertNotIn('build:', compose)
+        self.assertFalse((ROOT / 'deploy/my-mastra-deploy.service').exists())
+        self.assertFalse((ROOT / 'deploy/my-mastra-deploy.timer').exists())
+        wrapper = (ROOT / 'deploy/samkim-deploy').read_text()
+        self.assertIn('exec /usr/bin/env -i', wrapper)
+        self.assertIn('/usr/bin/python3 -I /srv/selfhost/apps/my-mastra/deploy.py', wrapper)
         self.assertNotIn('self-hosted', (ROOT / '.github/workflows/ci.yml').read_text())
 
 

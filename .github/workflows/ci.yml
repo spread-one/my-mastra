@@ -5,6 +5,9 @@ on:
   pull_request:
 permissions:
   contents: read
+concurrency:
+  group: samkim-main-delivery-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -22,6 +25,12 @@ jobs:
       - run: node dist/cli.js --help
       - run: node dist/slack.js --help
       - run: npm run test:deployment
+      - name: Hosted-only linux/amd64 image build and keyless smoke (no push)
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          docker build --platform linux/amd64 --build-arg VCS_REF="$SHA" --build-arg SOURCE_URL=https://github.com/spread-one/my-mastra -t my-mastra:ci-smoke .
+          bash deploy/smoke.sh my-mastra:ci-smoke
   publish:
     needs: check
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'spread-one/my-mastra'
@@ -30,8 +39,18 @@ jobs:
     permissions:
       contents: read
       packages: write
+    concurrency:
+      group: samkim-ghcr-mutation
+      cancel-in-progress: false
+    outputs:
+      digest: ${{ steps.image.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
+      - name: Refuse an outdated main publication
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          test "$(timeout 15s git ls-remote https://github.com/spread-one/my-mastra.git refs/heads/main | cut -f1)" = "$SHA"
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -52,7 +71,10 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/spread-one/my-mastra
             org.opencontainers.image.revision=${{ github.sha }}
-          provenance: mode=min
+          # Single-platform manifest; OCI source/revision labels are verified below.
+          # No new index/attestation versions; cleanup also protects legacy OCI graphs.
+          provenance: false
+          sbom: false
       - name: Verify published provenance and record digest
         env:
           SHA: ${{ github.sha }}
@@ -63,4 +85,54 @@ jobs:
           docker pull --platform linux/amd64 "$IMAGE"
           test "$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE")" = "$SHA"
           test "$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.source" }}' "$IMAGE")" = 'https://github.com/spread-one/my-mastra'
-          printf 'Published main `%s`\n\n`%s` (linux/amd64)\n' "$SHA" "$IMAGE" >> "$GITHUB_STEP_SUMMARY"
+          test "$(timeout 15s git ls-remote https://github.com/spread-one/my-mastra.git refs/heads/main | cut -f1)" = "$SHA"
+          printf 'Published main `%s`\n\n`%s` (linux/amd64, verified OCI source/revision labels)\n' "$SHA" "$IMAGE" >> "$GITHUB_STEP_SUMMARY"
+  deploy:
+    needs: [check, publish]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'spread-one/my-mastra'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    environment: selfhost
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fail fast if private deployment auth is not configured
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+          TS_CI_TAG: ${{ vars.TS_CI_TAG }}
+          TS_SERVER_TAG: ${{ vars.TS_SERVER_TAG }}
+          TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          TS_OAUTH_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
+          SHA: ${{ github.sha }}
+          DIGEST: ghcr.io/spread-one/my-mastra@${{ needs.publish.outputs.digest }}
+        run: bash deploy/ci-deploy.sh --check
+      - name: Ephemeral tagged Tailscale client (no persistent runner or SSH key)
+        uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade # v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: ${{ vars.TS_CI_TAG }}
+          version: '1.82.0'
+          timeout: 60s
+          retry: '1'
+          tailscaled-args: --tun=userspace-networking
+          args: --accept-routes=false --accept-dns=true
+      - name: Native Tailscale SSH — report actual health/rollback result
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+          TS_CI_TAG: ${{ vars.TS_CI_TAG }}
+          TS_SERVER_TAG: ${{ vars.TS_SERVER_TAG }}
+          TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          TS_OAUTH_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
+          SHA: ${{ github.sha }}
+          DIGEST: ghcr.io/spread-one/my-mastra@${{ needs.publish.outputs.digest }}
+        run: bash deploy/ci-deploy.sh
+      - name: Remove ephemeral tailnet session
+        if: always()
+        run: |
+          if command -v tailscale >/dev/null; then
+            timeout 15s sudo tailscale logout >/dev/null 2>&1 || echo 'ci tailscale_logout_deferred'
+          fi
