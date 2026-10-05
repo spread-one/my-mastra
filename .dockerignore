@@ -1,0 +1,19 @@
+# Allowlist: credentials, .git, tests, host state and node_modules never enter context.
+**
+!package.json
+!package-lock.json
+!tsconfig.json
+!src/
+!src/**
+src/**/*.test.ts
+!Dockerfile
+.env*
+**/.env*
+**/*credentials*
+**/secrets*
+**/*.pem
+**/*.key
+**/node_modules
+**/node_modules/**
+**/.git
+.git

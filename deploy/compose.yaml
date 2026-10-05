@@ -1,0 +1,26 @@
+name: my-mastra
+services:
+  bot:
+    image: ${BOT_IMAGE:?digest-pinned BOT_IMAGE is required}
+    platform: linux/amd64
+    restart: unless-stopped
+    init: true
+    user: "1000:1000"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,uid=1000,gid=1000,mode=1700
+      - /run/my-mastra:rw,noexec,nosuid,size=1m,uid=1000,gid=1000,mode=0700
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    env_file:
+      - path: .env.runtime
+        format: raw
+    environment:
+      NODE_ENV: production
+      SLACK_HEALTH_FILE: /run/my-mastra/health.json
+    stop_grace_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

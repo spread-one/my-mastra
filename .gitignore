@@ -6,3 +6,8 @@ coverage/
 !.env.example
 *.log
 .DS_Store
+__pycache__/
+*.py[cod]
+/deploy/state/
+/deploy/image.env
+/deploy/deploy.lock

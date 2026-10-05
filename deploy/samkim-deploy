@@ -1,0 +1,20 @@
+#!/bin/sh
+# Root-owned, sole sudo entry point. No paths, flags, credentials, environment overrides,
+# shell command strings, force, rollback, or arbitrary Docker operations are accepted.
+set -eu
+# POSIX range matching must be ASCII, not locale-dependent collation (A must not match a-f).
+LC_ALL=C
+export LC_ALL
+if [ "$#" -ne 2 ]; then printf '%s\n' 'deploy wrapper_invalid_args'; exit 1; fi
+case "$1" in *[!0-9a-f]*|'') printf '%s\n' 'deploy wrapper_invalid_sha'; exit 1;; esac
+[ "${#1}" -eq 40 ] || { printf '%s\n' 'deploy wrapper_invalid_sha'; exit 1; }
+prefix='ghcr.io/spread-one/my-mastra@sha256:'
+case "$2" in "$prefix"*) hex=${2#"$prefix"};; *) printf '%s\n' 'deploy wrapper_invalid_digest'; exit 1;; esac
+case "$hex" in *[!0-9a-f]*|'') printf '%s\n' 'deploy wrapper_invalid_digest'; exit 1;; esac
+[ "${#hex}" -eq 64 ] || { printf '%s\n' 'deploy wrapper_invalid_digest'; exit 1; }
+# env -i and Python isolated mode defeat APP_DIR/PATH/PYTHONPATH/GIT/DOCKER/COMPOSE injection.
+# Timeout signals normal rollback and bounds a stuck process/child during recovery too.
+cd /
+exec /usr/bin/env -i PATH=/usr/bin:/bin HOME=/root LANG=C.UTF-8 \
+  /usr/bin/timeout --signal=TERM --kill-after=110s 240s \
+  /usr/bin/python3 -I /srv/selfhost/apps/my-mastra/deploy.py --sha "$1" --digest "$2"

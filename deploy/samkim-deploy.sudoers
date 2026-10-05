@@ -1,0 +1,5 @@
+# Installed root:root 0440; OS account has neither docker group nor other sudo rights.
+# Arguments are strictly validated by the immutable root-owned wrapper.
+Defaults:samkim-deploy env_reset
+Defaults:samkim-deploy secure_path="/usr/bin:/bin"
+samkim-deploy ALL=(root) NOPASSWD: NOSETENV: /usr/local/sbin/samkim-deploy
