@@ -13,7 +13,7 @@ elif [[ "$EUID" -ne 0 ]]; then
   echo 'install root_required'; exit 1
 fi
 # Fixed app and wrapper paths are part of the privilege boundary, not configurable in CI.
-[[ -z "${APP_DIR:-}" || "$APP_DIR" == /srv/selfhost/apps/my-mastra ]] || { echo 'install fixed_path_required'; exit 1; }
+[[ -z "${APP_DIR:-}" || "$APP_DIR" == /opt/samkim ]] || { echo 'install fixed_path_required'; exit 1; }
 if [[ -z "$STAGE" ]]; then
   for executable in /usr/bin/python3 /usr/bin/git /usr/bin/docker /usr/bin/timeout /usr/sbin/visudo; do
     [[ -x "$executable" ]] || { echo 'install required_executable_missing'; exit 1; }
@@ -35,7 +35,7 @@ import tempfile
 
 stage = os.environ['STAGE']
 source = Path(os.environ['SOURCE_DIR'])
-target = Path(stage + '/srv/selfhost/apps/my-mastra')
+target = Path(stage + '/opt/samkim')
 wrapper = Path(stage + '/usr/local/sbin/samkim-deploy')
 sudoers = Path(stage + '/etc/sudoers.d/samkim-deploy')
 for path in (target, wrapper.parent, sudoers.parent):

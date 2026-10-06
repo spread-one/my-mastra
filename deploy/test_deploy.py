@@ -11,6 +11,7 @@ import stat
 import subprocess
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -88,6 +89,9 @@ class Fake(d.Deployer):
     def assert_scoped(args):
         assert '--project-name' in args and args[args.index('--project-name') + 1] == 'my-mastra'
         assert args[-1] == 'bot'
+        assert args[args.index('--project-directory') + 1] == str(d.APP)
+        assert args[args.index('--env-file') + 1] == str(d.APP / 'image.env')
+        assert args[args.index('-f') + 1] == str(d.APP / 'compose.yaml')
         assert not any(item in args for item in ('down', 'prune', 'rm', 'reset'))
         if 'up' in args:
             assert '--no-deps' in args and '--force-recreate' in args and '--pull' in args
@@ -96,7 +100,7 @@ class Fake(d.Deployer):
 class DeployTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='deploy-test-')
-        self.app = Path(self.temp.name).resolve() / 'apps/my-mastra'
+        self.app = Path(self.temp.name).resolve() / 'opt/samkim'
         self.app.mkdir(parents=True, mode=0o700)
         self.root_patch = patch.object(d, 'APP', self.app)
         self.root_patch.start()
@@ -278,13 +282,42 @@ class DeployTests(unittest.TestCase):
             self.assertIn('locked_busy', result.stdout)
         finally:
             lock.close()
-        for root in ['/', '/tmp', str(self.app / '..'), 'relative']:
+        for root in ['/', '/tmp', '/opt', '/opt/other', str(self.app / '..'), 'relative']:
             with patch.object(d, 'APP', Path(root)), self.assertRaises(d.Failed):
                 d.prepare()
-        symlink = Path(self.temp.name) / 'apps/link'
+        symlink = Path(self.temp.name) / 'opt/link'
         symlink.symlink_to(self.app, target_is_directory=True)
         with patch.object(d, 'APP', symlink), self.assertRaises(d.Failed):
             d.prepare()
+
+    def test_fixed_short_root_path_passes_prepare_with_private_state(self):
+        # Simulate root-owned /opt/samkim without touching the real /opt filesystem.
+        app = Path('/opt/samkim')
+        info = SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=os.geteuid())
+        with patch.object(d, 'APP', app), patch.object(Path, 'resolve', autospec=True, side_effect=lambda path: path), patch.object(Path, 'lstat', return_value=info), patch.object(Path, 'mkdir') as mkdir, patch.object(Path, 'exists', return_value=False), patch.object(Path, 'is_symlink', return_value=False):
+            d.prepare()
+            mkdir.assert_called_once_with(mode=0o700, exist_ok=True)
+        for mode, uid in [(0o755, os.geteuid()), (0o700, os.geteuid() + 1)]:
+            bad = SimpleNamespace(st_mode=stat.S_IFDIR | mode, st_uid=uid)
+            with patch.object(d, 'APP', app), patch.object(Path, 'resolve', return_value=app), patch.object(Path, 'lstat', return_value=bad), self.assertRaisesRegex(d.Failed, 'app_dir_permissions'):
+                d.prepare()
+        with patch.object(d, 'APP', app), patch.object(Path, 'resolve', return_value=Path('/elsewhere/samkim')), self.assertRaisesRegex(d.Failed, 'app_dir_unsafe'):
+            d.prepare()
+
+    def test_state_directory_stays_private_and_rejects_symlinks(self):
+        state = self.app / 'state'
+        self.assertEqual(stat.S_IMODE(state.stat().st_mode), 0o700)
+        state.chmod(0o750)
+        with self.assertRaisesRegex(d.Failed, 'state_dir_permissions'):
+            d.prepare()
+        state.chmod(0o700)
+        state.rmdir()
+        elsewhere = Path(self.temp.name).resolve() / 'elsewhere'
+        elsewhere.mkdir(mode=0o700)
+        state.symlink_to(elsewhere, target_is_directory=True)
+        with self.assertRaisesRegex(d.Failed, 'state_dir_permissions'):
+            d.prepare()
+        self.assertEqual(list(elsewhere.iterdir()), [])
 
     def test_entrypoint_failure_status_and_no_secret_logs(self):
         self.existing()
@@ -313,7 +346,11 @@ if Path(sys.argv[0]).name == 'git':
 elif args[:2] == ['image', 'inspect']:
     print(json.dumps({'Config': {'Labels': {'org.opencontainers.image.source': 'https://github.com/spread-one/my-mastra', 'org.opencontainers.image.revision': state['sha']}}, 'RepoDigests': [state['digest']], 'Os': 'linux', 'Architecture': 'amd64'}))
 elif args[0] == 'compose':
+    app = Path(os.environ['APP_DIR'])
     assert args[-1] == 'bot'
+    assert args[args.index('--project-directory') + 1] == str(app)
+    assert args[args.index('--env-file') + 1] == str(app / 'image.env')
+    assert args[args.index('-f') + 1] == str(app / 'compose.yaml')
     if 'up' in args:
         state['image'] = Path(os.environ['APP_DIR'], 'image.env').read_text().strip().split('=', 1)[1]
     elif 'ps' in args:
@@ -390,37 +427,115 @@ path.write_text(json.dumps(state))
 
 
 class InstallAndContracts(unittest.TestCase):
-    def test_staged_install_preserves_secrets_state_and_never_starts_app(self):
-        with tempfile.TemporaryDirectory() as stage:
-            stage = str(Path(stage).resolve())
-            app = Path(stage + '/srv/selfhost/apps/my-mastra')
+    def install(self, stage, override='/opt/samkim'):
+        env = {key: value for key, value in os.environ.items() if key != 'APP_DIR'}
+        if override is not None:
+            env['APP_DIR'] = override
+        return subprocess.run(['bash', str(ROOT / 'deploy/install.sh'), '--stage', str(stage)], env=env, capture_output=True, text=True, timeout=5)
+
+    def test_default_app_path_is_fixed_even_in_isolated_python(self):
+        code = 'import runpy; print(runpy.run_path(' + repr(str(ROOT / 'deploy/deploy.py')) + ')["APP"])'
+        env = {key: value for key, value in os.environ.items() if key != 'APP_DIR'}
+        result = subprocess.run(['python3', '-I', '-c', code], env=env, capture_output=True, text=True, timeout=3)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), '/opt/samkim')
+
+    def test_fresh_install_allows_only_unset_empty_or_fixed_override(self):
+        for override in [None, '', '/opt/samkim']:
+            with self.subTest(override=override), tempfile.TemporaryDirectory() as directory:
+                stage = Path(directory).resolve()
+                result = self.install(stage, override)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                app = stage / 'opt/samkim'
+                self.assertEqual(stat.S_IMODE(app.stat().st_mode), 0o700)
+                self.assertEqual(app.stat().st_uid, os.geteuid())
+                for name in ['deploy.py', 'compose.yaml']:
+                    self.assertEqual((app / name).read_text(), (ROOT / 'deploy' / name).read_text())
+                    self.assertEqual(stat.S_IMODE((app / name).stat().st_mode), 0o600)
+                wrapper = stage / 'usr/local/sbin/samkim-deploy'
+                self.assertEqual(wrapper.read_text(), (ROOT / 'deploy/samkim-deploy').read_text())
+                self.assertEqual(stat.S_IMODE(wrapper.stat().st_mode), 0o755)
+                self.assertEqual(stat.S_IMODE((stage / 'etc/sudoers.d/samkim-deploy').stat().st_mode), 0o440)
+                self.assertFalse((stage / 'srv').exists())
+                self.assertFalse((app / 'state').exists())
+                self.assertFalse((app / '.env').exists())
+
+    def test_staged_install_preserves_secrets_state_and_shared_parent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stage = Path(directory).resolve()
+            app = stage / 'opt/samkim'
             app.mkdir(parents=True, mode=0o700)
             (app / '.env').write_text(ENV)
-            (app / 'state').mkdir()
+            (app / '.env').chmod(0o600)
+            (app / 'state').mkdir(mode=0o700)
             (app / 'state/existing').write_text('keep')
-            result = subprocess.run(['bash', str(ROOT / 'deploy/install.sh'), '--stage', stage], env={**os.environ, 'APP_DIR': '/srv/selfhost/apps/my-mastra'}, capture_output=True, text=True, timeout=5)
+            shared = stage / 'srv/selfhost/apps'
+            shared.mkdir(parents=True)
+            shared.chmod(0o775)
+            (shared / 'other-app').write_text('untouched')
+            before = shared.stat()
+            result = self.install(stage)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual((app / '.env').read_text(), ENV)
+            self.assertEqual(stat.S_IMODE((app / '.env').stat().st_mode), 0o600)
             self.assertEqual((app / 'state/existing').read_text(), 'keep')
-            wrapper = (Path(stage) / 'usr/local/sbin/samkim-deploy').read_text()
-            self.assertIn('/usr/bin/python3 -I /srv/selfhost/apps/my-mastra/deploy.py', wrapper)
-            sudoers = Path(stage) / 'etc/sudoers.d/samkim-deploy'
-            self.assertEqual(stat.S_IMODE(sudoers.stat().st_mode), 0o440)
-            self.assertIn('NOSETENV: /usr/local/sbin/samkim-deploy', sudoers.read_text())
+            self.assertEqual((shared / 'other-app').read_text(), 'untouched')
+            self.assertEqual((shared.stat().st_uid, shared.stat().st_mode), (before.st_uid, before.st_mode))
+            self.assertFalse((shared / 'my-mastra').exists())
+            wrapper = (stage / 'usr/local/sbin/samkim-deploy').read_text()
+            self.assertIn('/usr/bin/python3 -I /opt/samkim/deploy.py', wrapper)
+            self.assertIn('NOSETENV: /usr/local/sbin/samkim-deploy', (stage / 'etc/sudoers.d/samkim-deploy').read_text())
             self.assertIn('app_not_started', result.stdout)
-            self.assertFalse((Path(stage) / 'etc/systemd').exists())
+            self.assertFalse((stage / 'etc/systemd').exists())
 
-    def test_install_custom_app_dir_and_symlink_rejected(self):
-        with tempfile.TemporaryDirectory() as directory:
-            stage = str(Path(directory).resolve())
-            result = subprocess.run(['bash', str(ROOT / 'deploy/install.sh'), '--stage', stage], env={**os.environ, 'APP_DIR': '/srv/selfhost/apps/custom-bot'}, capture_output=True, text=True, timeout=5)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn('fixed_path_required', result.stdout)
-            app = Path(stage) / 'srv/selfhost/apps/my-mastra'
-            app.mkdir(parents=True, mode=0o700)
-            (app / 'deploy.py').symlink_to(app / 'compose.yaml')
-            result = subprocess.run(['bash', str(ROOT / 'deploy/install.sh'), '--stage', stage], env={**os.environ, 'APP_DIR': '/srv/selfhost/apps/my-mastra'}, capture_output=True, text=True, timeout=5)
-            self.assertNotEqual(result.returncode, 0)
+    def test_install_custom_and_legacy_app_dir_overrides_rejected_before_writes(self):
+        for override in ['/srv/selfhost/apps/my-mastra', '/opt/custom-bot', '/opt/samkim/', '/opt/samkim/../custom', 'relative', '/opt/samkim;id']:
+            with self.subTest(override=override), tempfile.TemporaryDirectory() as directory:
+                stage = Path(directory).resolve()
+                result = self.install(stage, override)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('fixed_path_required', result.stdout)
+                self.assertEqual(list(stage.iterdir()), [])
+
+    def test_install_app_permissions_and_symlink_paths_rejected(self):
+        for kind in ['permissions', 'parent', 'app', 'file']:
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                stage = Path(directory).resolve()
+                app = stage / 'opt/samkim'
+                if kind in ['permissions', 'file']:
+                    app.mkdir(parents=True, mode=0o700)
+                    if kind == 'permissions':
+                        app.chmod(0o755)
+                    else:
+                        (app / 'deploy.py').symlink_to(app / 'compose.yaml')
+                else:
+                    elsewhere = stage / 'elsewhere'
+                    elsewhere.mkdir(mode=0o700)
+                    link = stage / 'opt' if kind == 'parent' else app
+                    link.parent.mkdir(parents=True, exist_ok=True)
+                    link.symlink_to(elsewhere, target_is_directory=True)
+                result = self.install(stage)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('app_dir_permissions' if kind == 'permissions' else 'symlink_', result.stderr)
+                self.assertFalse((stage / 'usr/local/sbin/samkim-deploy').exists())
+
+    def test_production_installer_rejects_untrusted_parents_before_writes(self):
+        # Execute the actual installer Python preflight with a synthetic root filesystem.
+        # Stage mode intentionally does not assert host root ownership; do not use it
+        # as evidence that the production trusted-parent checks ran.
+        source = (ROOT / 'deploy/install.sh').read_text().split("<<'PY'\n", 1)[1].rsplit('\nPY', 1)[0]
+        for parent in ['/', '/opt', '/opt/samkim', '/usr', '/usr/local', '/usr/local/sbin', '/etc', '/etc/sudoers.d']:
+            for uid, mode in [(1000, 0o700), (0, 0o720), (0, 0o702)]:
+                with self.subTest(parent=parent, uid=uid, mode=oct(mode)):
+                    def info(path):
+                        return SimpleNamespace(st_uid=uid if str(path) == parent else 0, st_mode=stat.S_IFDIR | (mode if str(path) == parent else 0o700))
+                    with patch.dict(os.environ, {'STAGE': '', 'SOURCE_DIR': str(ROOT / 'deploy')}), patch.object(Path, 'exists', return_value=True), patch.object(Path, 'is_symlink', return_value=False), patch.object(Path, 'stat', autospec=True, side_effect=info), patch.object(Path, 'mkdir') as mkdir, self.assertRaisesRegex(SystemExit, 'untrusted_parent_path'):
+                        exec(compile(source, 'install-fixture', 'exec'), {})
+                    mkdir.assert_not_called()
+        for parent in ['/opt', '/opt/samkim', '/usr', '/usr/local', '/usr/local/sbin', '/etc', '/etc/sudoers.d']:
+            with self.subTest(symlink=parent), patch.dict(os.environ, {'STAGE': '', 'SOURCE_DIR': str(ROOT / 'deploy')}), patch.object(Path, 'exists', return_value=False), patch.object(Path, 'is_symlink', autospec=True, side_effect=lambda path: str(path) == parent), patch.object(Path, 'mkdir') as mkdir, self.assertRaisesRegex(SystemExit, 'symlink_path'):
+                exec(compile(source, 'install-fixture', 'exec'), {})
+            mkdir.assert_not_called()
 
     def test_workflow_only_trusted_main_publishes_after_hosted_check(self):
         workflow = (ROOT / '.github/workflows/ci.yml').read_text()
@@ -463,7 +578,7 @@ class InstallAndContracts(unittest.TestCase):
         self.assertFalse((ROOT / 'deploy/my-mastra-deploy.timer').exists())
         wrapper = (ROOT / 'deploy/samkim-deploy').read_text()
         self.assertIn('exec /usr/bin/env -i', wrapper)
-        self.assertIn('/usr/bin/python3 -I /srv/selfhost/apps/my-mastra/deploy.py', wrapper)
+        self.assertIn('/usr/bin/python3 -I /opt/samkim/deploy.py', wrapper)
         self.assertNotIn('self-hosted', (ROOT / '.github/workflows/ci.yml').read_text())
 
 

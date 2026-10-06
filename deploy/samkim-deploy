@@ -17,4 +17,4 @@ case "$hex" in *[!0-9a-f]*|'') printf '%s\n' 'deploy wrapper_invalid_digest'; ex
 cd /
 exec /usr/bin/env -i PATH=/usr/bin:/bin HOME=/root LANG=C.UTF-8 \
   /usr/bin/timeout --signal=TERM --kill-after=110s 240s \
-  /usr/bin/python3 -I /srv/selfhost/apps/my-mastra/deploy.py --sha "$1" --digest "$2"
+  /usr/bin/python3 -I /opt/samkim/deploy.py --sha "$1" --digest "$2"

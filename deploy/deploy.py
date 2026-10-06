@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 import time
 
-APP = Path(os.environ.get('APP_DIR', '/srv/selfhost/apps/my-mastra'))
+APP = Path(os.environ.get('APP_DIR', '/opt/samkim'))
 SOURCE = 'https://github.com/spread-one/my-mastra'
 IMAGE = 'ghcr.io/spread-one/my-mastra'
 SHA = re.compile(r'[0-9a-f]{40}')
@@ -357,7 +357,10 @@ class Deployer:
 
 
 def prepare():
-    if not APP.is_absolute() or str(APP.resolve()) != str(APP) or len(APP.parts) < 4 or re.search(r'[^a-zA-Z0-9/_-]', str(APP)):
+    # The fixed root-only target has three parts; keep shallow operator overrides blocked.
+    if (not APP.is_absolute() or str(APP.resolve()) != str(APP)
+            or (APP != Path('/opt/samkim') and len(APP.parts) < 4)
+            or re.search(r'[^a-zA-Z0-9/_-]', str(APP))):
         raise Failed('app_dir_unsafe')
     info = APP.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:

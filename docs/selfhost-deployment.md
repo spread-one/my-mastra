@@ -28,9 +28,9 @@ PR / main push -> GitHub-hosted check (typecheck/test/build/배포 계약)
 3. `deploy/tailnet-policy.example.hujson`은 추가 규칙의 placeholder **fragment**입니다. 기존 policy 전체를 덮지 않습니다. network grants는 CI -> target `tcp:22`만, SSH users는 `samkim-deploy` 하나로 제한합니다. CI에 `root`/`autogroup:nonroot`나 대화형 `check`를 허용하지 않습니다. 기존 broad grants/SSH rules가 추가 권한을 줄 수 있으므로 owner가 함께 audit합니다. administrator rule은 기존 실제 identity/OS user에 맞춰 유지합니다. Tailscale 정책/서버 tag/RunSSH를 worker가 변경하지 않았습니다.
 4. OAuth client는 ephemeral tagged node를 만들 수 있는 최소 auth-key scope 및 `tag:samkim-ci`만 부여합니다. CI client에 server tag 적용 권한, tailnet ACL 관리, 광범위 device 관리 권한을 주지 않습니다. 실제 OAuth scope/tag-owner 제약은 owner가 콘솔에서 확인합니다. 이 PR은 official pinned Tailscale action v3/OAuth를 사용하고 memory state/userspace networking/no accepted subnet routes, connect retry 1을 설정합니다. job 마지막에는 bounded logout을 시도합니다.
 5. OS 계정 `samkim-deploy`를 owner가 준비합니다. interactive shell은 native SSH의 고정 명령 실행에 필요하지만 **docker group/일반 sudo/root access는 금지**합니다. app dir를 읽거나 수정할 수 없어야 합니다. native Tailscale SSH가 OS user/command access를 제한하며 일반 SSH daemon은 필요하지 않습니다.
-6. root가 검토된 템플릿을 설치합니다. `/srv/selfhost/apps/my-mastra`와 `.env`/code/Compose/state는 root-owned, app dir 0700/secret files 0600. `/usr/local/sbin/samkim-deploy`는 root-owned 0755, `/etc/sudoers.d/samkim-deploy` root-owned 0440. sudoers는 이 wrapper 하나만 NOPASSWD/NOSETENV, env_reset/secure_path로 허용합니다. installer는 계정/tag/policy를 생성/변경하지 않고, 이미 준비된 전용 계정의 위험 그룹을 거부합니다. 다른 sudoers/그룹 멤버십까지 owner가 audit해야 합니다.
+6. root가 검토된 템플릿을 설치합니다. `/opt/samkim`과 `.env`/code/Compose/state는 root-owned, app dir 0700/secret files 0600. `/usr/local/sbin/samkim-deploy`는 root-owned 0755, `/etc/sudoers.d/samkim-deploy` root-owned 0440. sudoers는 이 wrapper 하나만 NOPASSWD/NOSETENV, env_reset/secure_path로 허용합니다. installer는 계정/tag/policy를 생성/변경하지 않고, 이미 준비된 전용 계정의 위험 그룹을 거부합니다. 다른 sudoers/그룹 멤버십까지 owner가 audit해야 합니다.
 
-Wrapper는 **정확히 SHA 40 lowercase hex + ghcr.io/spread-one/my-mastra@sha256:64 lowercase hex 두 argv만** 허용합니다. `--force`, `--rollback`, APP_DIR/repo/Docker/path/command overrides, 공백/셸문자/추가 argv는 거부합니다. shell range는 ASCII locale로 검증하고 `env -i` + fixed PATH/absolute binaries + Python `-I`로 APP_DIR/PYTHONPATH/GIT/DOCKER/COMPOSE/environment 주입을 차단합니다. root operator의 직접 CLI/rollback과 CI의 sudo wrapper 경계를 구분합니다. wrapper는 cwd도 `/`로 고정하고 host script는 Docker/Git을 `/usr/bin/docker`, `/usr/bin/git` 절대 경로로만 실행합니다. installer는 실제 trusted binaries와 대상의 모든 parent가 root-owned/non-group-other-writable인지 검증하며 불일치 시 부모 권한을 자동 변경하지 않고 거부합니다. root script/Compose가 user-writable이면 이 경계가 무너지므로 설치/업데이트 권한을 지켜야 합니다.
+Wrapper는 **정확히 SHA 40 lowercase hex + ghcr.io/spread-one/my-mastra@sha256:64 lowercase hex 두 argv만** 허용합니다. `--force`, `--rollback`, APP_DIR/repo/Docker/path/command overrides, 공백/셸문자/추가 argv는 거부합니다. shell range는 ASCII locale로 검증하고 `env -i` + fixed PATH/absolute binaries + Python `-I`로 APP_DIR/PYTHONPATH/GIT/DOCKER/COMPOSE/environment 주입을 차단합니다. root operator의 직접 CLI/rollback과 CI의 sudo wrapper 경계를 구분합니다. wrapper는 cwd도 `/`로 고정하고 host script는 Docker/Git을 `/usr/bin/docker`, `/usr/bin/git` 절대 경로로만 실행합니다. installer는 실제 trusted binaries와 대상의 모든 parent(`/`, `/opt` 포함)가 root-owned/non-group-other-writable인지 검증하며 symlink 경로도 거부합니다. 불일치 시 부모 권한을 자동 변경하지 않고 거부합니다. 일반 사용자 소유 공유 `/srv/selfhost`/`apps`는 그대로 두고 root-trusted app만 `/opt/samkim`에 분리합니다. 공유 부모 chown, 검사 완화, symlink 우회는 하지 않습니다. root script/Compose가 user-writable이면 이 경계가 무너지므로 설치/업데이트 권한을 지켜야 합니다.
 
 ### GitHub selfhost environment configuration
 
@@ -58,14 +58,14 @@ Wrapper는 **정확히 SHA 40 lowercase hex + ghcr.io/spread-one/my-mastra@sha25
 # 먼저 계정/정책/태깅/관리자 연결을 승인하고 준비. 검토된 저장소 사본에서:
 sudo bash deploy/install.sh
 # owner가 비로그 안전한 방법으로 host .env 전달 후 소유권/권한만 확인
-sudo chown root:root /srv/selfhost/apps/my-mastra/.env
-sudo chmod 600 /srv/selfhost/apps/my-mastra/.env
+sudo chown root:root /opt/samkim/.env
+sudo chmod 600 /opt/samkim/.env
 # sudoers 구문/실제 허용 명령 확인 (비밀번호/키를 출력하지 않음)
 sudo visudo -cf /etc/sudoers.d/samkim-deploy
 sudo -l -U samkim-deploy
 ```
 
-installer는 root 코드/Compose/고정 wrapper/단일 sudoers만 설치하며 env/state/계정/tailnet/서비스를 덮거나 앱을 시작하지 않습니다. 앱 dir override는 허용하지 않습니다. `--stage ABSOLUTE_DIRECTORY`는 로컬 fixture 설치용이며 실제 account/sudoers 적용이 아닙니다. 업데이트는 in-flight deploy가 없는 상태에서 owner가 같은 installer를 실행하고 native SSH 배포를 재검증합니다. 이전 제출본 timer는 서버에 설치하지 않았습니다. 혹시 별도로 설치된 환경이면 owner가 먼저 disable/stop/remove하고 중복 운영하지 않아야 합니다.
+installer는 root 코드/Compose/고정 wrapper/단일 sudoers만 설치하며 env/state/계정/tailnet/서비스를 덮거나 앱을 시작하지 않습니다. installer의 `APP_DIR`는 unset/빈 값 또는 정확히 `/opt/samkim`만 허용하며 다른 경로(이전 경로 포함)는 거부합니다. root operator의 직접 Python CLI는 private 절대 경로 override를 지원하지만 CI wrapper의 `env -i`는 이를 제거해 고정 경로만 사용합니다. `--stage ABSOLUTE_DIRECTORY`는 로컬 fixture 설치용이며 실제 account/sudoers 적용이 아닙니다. `/opt/samkim` 서버 bootstrap/키 전달/기존 앱 처리와 실제 배포 검증은 main owner가 별도로 수행하며 이 경로 변경 PR은 원격 운영 상태를 변경하지 않습니다. 업데이트는 in-flight deploy가 없는 상태에서 owner가 같은 installer를 실행하고 native SSH 배포를 재검증합니다. 이전 제출본 timer는 서버에 설치하지 않았습니다. 혹시 별도로 설치된 환경이면 owner가 먼저 disable/stop/remove하고 중복 운영하지 않아야 합니다.
 
 `.env`는 source하지 않습니다. 허용 키는 `DEEPSEEK_API_KEY`, `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `DEEPSEEK_MODEL`, `EXA_API_KEY`; `KEY=value` 각 한 줄, 빈 줄/# 주석과 단순 enclosing quotes는 허용합니다. export/중복/interpolation/내부 whitespace/control/dollar/backtick/backslash/quote/placeholder는 거부합니다. 실제 키 원문은 로그에 쓰지 않습니다. root-only env snapshot은 **키 사본**이므로 접근/백업도 보호합니다. privileged Docker/root operator는 container env를 읽을 수 있는 신뢰 경계입니다. `.dockerignore` allowlist가 credentials/env/git/node_modules/host state를 image context에서 제외합니다. secret buildargs/cache upload/image layer는 없습니다.
 
@@ -100,17 +100,17 @@ candidate는 root/parent를 child보다 먼저 삭제합니다. 매 삭제 직�
 
 ```bash
 # root owner의 explicit 최신 main/digest 재배포 (Actions wrapper에는 force 허용 안 함)
-sudo python3 /srv/selfhost/apps/my-mastra/deploy.py --sha FULL_MAIN_SHA \
+sudo python3 /opt/samkim/deploy.py --sha FULL_MAIN_SHA \
   --digest ghcr.io/spread-one/my-mastra@sha256:FULL_DIGEST_HEX --force
 # root owner의 수동 이전 성공 복구 (자동 main workflow를 먼저 중지/승인 gate로 보류)
-sudo python3 /srv/selfhost/apps/my-mastra/deploy.py --rollback
+sudo python3 /opt/samkim/deploy.py --rollback
 # secret 없는 상태 확인
-sudo cat /srv/selfhost/apps/my-mastra/state/deployed.json
-sudo cat /srv/selfhost/apps/my-mastra/state/status.json
+sudo cat /opt/samkim/state/deployed.json
+sudo cat /opt/samkim/state/status.json
 sudo docker ps --filter label=com.docker.compose.project=my-mastra
 # bot 자체만 멈춤: in-flight deploy가 없는 상태에서
-sudo docker compose --project-name my-mastra --project-directory /srv/selfhost/apps/my-mastra \
-  --env-file /srv/selfhost/apps/my-mastra/image.env -f /srv/selfhost/apps/my-mastra/compose.yaml stop bot
+sudo docker compose --project-name my-mastra --project-directory /opt/samkim \
+  --env-file /opt/samkim/image.env -f /opt/samkim/compose.yaml stop bot
 ```
 
 자동 배포 보류/중지는 owner가 GitHub workflow disable 또는 environment 승인 gate로 처리합니다. 이미 시작된 remote deploy는 취소 이후에도 rollback/commit을 마칠 수 있으므로 실제 상태를 확인합니다. `.env`/snapshot cat, full compose config/inspect, SDK debug payload/credential logs를 공유하지 마세요. SSH key/hostkey check 우회는 지원하지 않습니다.
