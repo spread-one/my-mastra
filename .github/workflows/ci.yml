@@ -13,8 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4 backport fixes (#2524)
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24'
           cache: npm
@@ -25,7 +25,7 @@ jobs:
       - run: node dist/cli.js --help
       - run: node dist/slack.js --help
       - run: npm run test:deployment
-      - name: Hosted-only linux/amd64 image build and keyless smoke (no push)
+      - name: Hosted-only linux/amd64 image build and secret-free smoke (no push/signing)
         env:
           SHA: ${{ github.sha }}
         run: |
@@ -39,27 +39,28 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
     concurrency:
       group: samkim-ghcr-mutation
       cancel-in-progress: false
     outputs:
       digest: ${{ steps.image.outputs.digest }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4 backport fixes (#2524)
       - name: Refuse an outdated main publication
         env:
           SHA: ${{ github.sha }}
         run: |
           test "$(timeout 15s git ls-remote https://github.com/spread-one/my-mastra.git refs/heads/main | cut -f1)" = "$SHA"
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Publish full SHA (no latest tag, no secret build arguments or remote caches)
         id: image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           platforms: linux/amd64
@@ -71,11 +72,11 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/spread-one/my-mastra
             org.opencontainers.image.revision=${{ github.sha }}
-          # Single-platform manifest; OCI source/revision labels are verified below.
-          # No new index/attestation versions; cleanup also protects legacy OCI graphs.
+          # Labels are metadata, NOT cryptographic build provenance.
+          # Keyless digest signature below; no separate build provenance attestation.
           provenance: false
           sbom: false
-      - name: Verify published provenance and record digest
+      - name: Verify published metadata and record digest
         env:
           SHA: ${{ github.sha }}
           DIGEST: ${{ steps.image.outputs.digest }}
@@ -87,6 +88,23 @@ jobs:
           test "$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.source" }}' "$IMAGE")" = 'https://github.com/spread-one/my-mastra'
           test "$(timeout 15s git ls-remote https://github.com/spread-one/my-mastra.git refs/heads/main | cut -f1)" = "$SHA"
           printf 'Published main `%s`\n\n`%s` (linux/amd64, verified OCI source/revision labels)\n' "$SHA" "$IMAGE" >> "$GITHUB_STEP_SUMMARY"
+      - name: Install pinned official Cosign (checksum before execution)
+        run: python3 -I deploy/cosign_download.py "$RUNNER_TEMP/cosign"
+      - name: GitHub OIDC keyless sign and verify exact main workflow digest
+        env:
+          SHA: ${{ github.sha }}
+          DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ && "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          test "$(timeout 15s git ls-remote https://github.com/spread-one/my-mastra.git refs/heads/main | cut -f1)" = "$SHA"
+          IMAGE="ghcr.io/spread-one/my-mastra@$DIGEST"
+          timeout 60s "$RUNNER_TEMP/cosign" sign --yes "$IMAGE"
+          timeout 30s "$RUNNER_TEMP/cosign" verify \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity https://github.com/spread-one/my-mastra/.github/workflows/ci.yml@refs/heads/main \
+            "$IMAGE" >/dev/null
+          printf '\nKeyless digest signature verified for exact main workflow (not build provenance).\n' >> "$GITHUB_STEP_SUMMARY"
   deploy:
     needs: [check, publish]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'spread-one/my-mastra'
@@ -96,7 +114,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4 backport fixes (#2524)
       - name: Fail fast if private deployment auth is not configured
         env:
           DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}

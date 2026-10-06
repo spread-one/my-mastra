@@ -67,6 +67,7 @@ class Retention(unittest.TestCase):
         self.app = app
         self.override = patch.object(d, 'APP', app)
         self.override.start()
+        (self.app / 'state').mkdir(mode=0o700)
         d.prepare()
         self.docker = Docker()
         for n in range(1, 7):

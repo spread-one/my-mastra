@@ -69,6 +69,18 @@ class AuthBoundary(unittest.TestCase):
         check, jobs = workflow.split('  publish:\n')
         publish, deploy = jobs.split('  deploy:\n')
         self.assertNotIn('TS_OAUTH_SECRET', check)
+        self.assertNotIn('id-token: write', check)
+        self.assertNotIn('id-token: write', deploy)
+        self.assertEqual(workflow.count('id-token: write'), 1)
+        self.assertIn('id-token: write', publish)
+        self.assertIn('cosign" sign --yes "$IMAGE"', publish)
+        self.assertIn('--certificate-oidc-issuer https://token.actions.githubusercontent.com', publish)
+        self.assertIn('--certificate-identity https://github.com/spread-one/my-mastra/.github/workflows/ci.yml@refs/heads/main', publish)
+        self.assertIn('python3 -I deploy/cosign_download.py', publish)
+        self.assertNotIn('--insecure-ignore', workflow)
+        import re
+        for action in re.findall(r'uses: (\S+)', workflow):
+            self.assertRegex(action, r'^[\w/-]+@[0-9a-f]{40}$')
         self.assertNotIn('TS_OAUTH_SECRET', publish)
         self.assertIn('needs: [check, publish]', deploy)
         self.assertIn("github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'spread-one/my-mastra'", deploy)

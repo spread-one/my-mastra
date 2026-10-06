@@ -43,11 +43,18 @@ class Fake(d.Deployer):
         self.running = DIGEST_A
         self.ready = True
         self.restarts = 0
+        self.limits = '1000000000|1073741824|128'
         self.fail_pull = False
         self.fail_network = False
         self.fail_candidate = False
         self.fail_rollback = False
         self.stopped = False
+
+    def verify_signature(self, digest):
+        # Synthetic accepted Cosign path; security fixtures exercise real method below.
+        if digest in getattr(self, 'unsigned', set()):
+            raise d.Failed('signature_verification_failed')
+        self.verified.add(digest)
 
     def run(self, sha=SHA_B, digest=DIGEST_B, force=False, rollback=False):
         return super().run(sha, digest, force, rollback)
@@ -82,7 +89,7 @@ class Fake(d.Deployer):
             return ''
         if args[1] == 'inspect':
             ready = self.ready and not (self.fail_candidate and self.running == DIGEST_B) and not (self.fail_rollback and self.running == DIGEST_A)
-            return f'running|{"healthy" if ready else "unhealthy"}|{self.restarts}|{self.running}'
+            return f'running|{"healthy" if ready else "unhealthy"}|{self.restarts}|{self.running}|{self.limits}'
         raise AssertionError('unexpected command')
 
     @staticmethod
@@ -109,6 +116,7 @@ class DeployTests(unittest.TestCase):
         self.sleep_patch = patch.object(d.time, 'sleep', self.clock.sleep)
         self.time_patch.start()
         self.sleep_patch.start()
+        (self.app / 'state').mkdir(mode=0o700)
         d.prepare()
         d.atomic(self.app / '.env', ENV)
         self.fake = Fake()
@@ -192,6 +200,79 @@ class DeployTests(unittest.TestCase):
             self.fake.run()
         self.assertEqual(self.fake.running, DIGEST_A)
 
+    def test_absent_state_managed_unmanaged_force_and_orphan_pending_preserve_all_bytes(self):
+        for running in [DIGEST_A, 'unmanaged/healthy:image']:
+            for force in [False, True]:
+                for pending_kind in [None, 'no_previous', 'has_previous']:
+                    with self.subTest(running=running, force=force, pending=pending_kind):
+                        pending = self.app / 'state/pending.json'
+                        if pending.exists():
+                            pending.unlink()
+                        self.fake.running = running
+                        self.fake.commands.clear()
+                        d.atomic(self.app / 'image.env', 'existing-runtime-image')
+                        d.atomic(self.app / '.env.runtime', 'existing-runtime-env')
+                        d.atomic(self.app / 'state/status.json', {'status': 'existing-healthy'})
+                        if pending_kind:
+                            d.atomic(pending, {'candidate': {'sha': SHA_B, 'digest': DIGEST_B, 'snapshot': 'env-candidate'},
+                                              'previous': {'sha': SHA_A, 'digest': DIGEST_A, 'snapshot': 'env-old'} if pending_kind == 'has_previous' else None})
+                        before = {p: p.read_bytes() for p in self.app.rglob('*') if p.is_file()}
+                        with self.assertRaisesRegex(d.Failed, 'deployment_anchor_required'):
+                            self.fake.run(force=force)
+                        self.assertEqual(before, {p: p.read_bytes() for p in self.app.rglob('*') if p.is_file()})
+                        self.assertEqual(self.fake.running, running)
+                        self.assertFalse(self.fake.commands)  # No pull/up/stop/verify/recovery.
+                        self.assertFalse(self.fake.verified)
+                        if pending_kind:
+                            with self.assertRaisesRegex(d.Failed, 'recovery_anchor_required'):
+                                self.fake.recover()
+                            self.assertEqual(before, {p: p.read_bytes() for p in self.app.rglob('*') if p.is_file()})
+                            self.assertFalse(self.fake.commands)
+                            self.assertEqual(self.fake.running, running)
+
+    def test_cli_missing_state_and_state_directory_never_bootstraps(self):
+        d.atomic(self.app / 'image.env', 'existing-runtime-image')
+        d.atomic(self.app / '.env.runtime', 'existing-runtime-env')
+        for directory_exists in [True, False]:
+            if not directory_exists:
+                (self.app / 'state').rmdir()
+            for flags in [[], ['--force'], ['--rollback']]:
+                with self.subTest(state_dir=directory_exists, flags=flags):
+                    before = {p: p.read_bytes() for p in self.app.rglob('*') if p.is_file()}
+                    output = io.StringIO()
+                    with patch.object(d, 'Deployer', lambda _env: self.fake), patch('sys.argv', ['deploy.py', '--sha', SHA_B, '--digest', DIGEST_B, *flags]), contextlib.redirect_stdout(output):
+                        self.assertEqual(d.main(), 1)
+                    after = {p: p.read_bytes() for p in self.app.rglob('*') if p.is_file()}
+                    # A persistent coordination lock can be created, not app/state data.
+                    before.pop(self.app / 'deploy.lock', None)
+                    after.pop(self.app / 'deploy.lock', None)
+                    self.assertEqual(before, after)
+                    self.assertEqual((self.app / 'state').exists(), directory_exists)
+                    self.assertFalse(self.fake.commands)
+                    self.assertFalse(self.fake.stopped)
+                    self.assertEqual(self.fake.running, DIGEST_A)
+
+    def test_orphan_pending_no_previous_cannot_modify_even_with_committed_state(self):
+        record = self.existing()
+        d.atomic(self.app / 'state/pending.json', {'candidate': record, 'previous': None})
+        before = {p: p.read_bytes() for p in self.app.rglob('*') if p.is_file()}
+        for action in [self.fake.recover, lambda: self.fake.run(), lambda: self.fake.run(force=True)]:
+            with self.assertRaisesRegex(d.Failed, 'recovery_anchor_required'):
+                action()
+            self.assertEqual(before, {p: p.read_bytes() for p in self.app.rglob('*') if p.is_file()})
+            self.assertFalse(self.fake.commands)
+            self.assertFalse(self.fake.stopped)
+            self.assertEqual(self.fake.running, DIGEST_A)
+
+    def test_missing_resource_limits_not_healthy_or_unchanged(self):
+        record = self.existing()
+        self.assertTrue(self.fake.health(record))
+        for limits in ['0|0|0', '1000000000|0|128', '0|1073741824|128', '1000000000|1073741824|0']:
+            self.fake.limits = limits
+            self.assertFalse(self.fake.health(record))
+        self.fake.limits = '1000000000|1073741824|128'
+        self.assertTrue(self.fake.health(record))
+
     def test_stale_head_before_activation_never_replaces(self):
         self.existing()
         self.fake.heads = [SHA_B, SHA_C]
@@ -224,14 +305,17 @@ class DeployTests(unittest.TestCase):
         self.assertEqual(self.state()['sha'], SHA_A)
         self.assertFalse((self.app / 'state/pending.json').exists())
 
-    def test_restarts_are_not_readiness_and_initial_failure_stops_only_bot(self):
+    def test_restarts_are_not_readiness_and_signed_anchor_recovery_never_stops_bot(self):
+        self.existing()
         self.fake.restarts = 1
         with self.assertRaisesRegex(d.Failed, 'readiness_failed'):
             self.fake.run()
+        self.fake.restarts = 0
         self.fake.recover()
-        self.assertFalse((self.app / 'state/deployed.json').exists())
-        self.assertTrue(self.fake.stopped)
-        self.assertEqual(json.loads((self.app / 'state/status.json').read_text())['status'], 'failed_initial_no_rollback')
+        self.assertEqual(self.state()['sha'], SHA_A)
+        self.assertEqual(self.fake.running, DIGEST_A)
+        self.assertFalse(self.fake.stopped)
+        self.assertFalse(any('stop' in command for command in self.fake.commands))
 
     def test_rollback_failure_keeps_pending_and_can_recover_next_poll(self):
         self.existing()
@@ -296,7 +380,7 @@ class DeployTests(unittest.TestCase):
         info = SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=os.geteuid())
         with patch.object(d, 'APP', app), patch.object(Path, 'resolve', autospec=True, side_effect=lambda path: path), patch.object(Path, 'lstat', return_value=info), patch.object(Path, 'mkdir') as mkdir, patch.object(Path, 'exists', return_value=False), patch.object(Path, 'is_symlink', return_value=False):
             d.prepare()
-            mkdir.assert_called_once_with(mode=0o700, exist_ok=True)
+            mkdir.assert_not_called()
         for mode, uid in [(0o755, os.geteuid()), (0o700, os.geteuid() + 1)]:
             bad = SimpleNamespace(st_mode=stat.S_IFDIR | mode, st_uid=uid)
             with patch.object(d, 'APP', app), patch.object(Path, 'resolve', return_value=app), patch.object(Path, 'lstat', return_value=bad), self.assertRaisesRegex(d.Failed, 'app_dir_permissions'):
@@ -330,6 +414,7 @@ class DeployTests(unittest.TestCase):
         self.assertEqual(self.state()['sha'], SHA_A)
 
     def test_real_cli_with_fake_git_and_docker_binaries(self):
+        self.existing()
         tools = Path(self.temp.name).resolve() / 'tools'
         tools.mkdir()
         fixture_state = tools / 'fixture.json'
@@ -344,7 +429,9 @@ state['commands'].append([Path(sys.argv[0]).name, *args])
 if Path(sys.argv[0]).name == 'git':
     print(state['sha'] + '\\trefs/heads/main')
 elif args[:2] == ['image', 'inspect']:
-    print(json.dumps({'Config': {'Labels': {'org.opencontainers.image.source': 'https://github.com/spread-one/my-mastra', 'org.opencontainers.image.revision': state['sha']}}, 'RepoDigests': [state['digest']], 'Os': 'linux', 'Architecture': 'amd64'}))
+    digest = args[-1] if '@sha256:' in args[-1] else state['digest']
+    revision = 'a' * 40 if digest.endswith('1' * 64) else state['sha']
+    print(json.dumps({'Config': {'Labels': {'org.opencontainers.image.source': 'https://github.com/spread-one/my-mastra', 'org.opencontainers.image.revision': revision}}, 'RepoDigests': [digest], 'Os': 'linux', 'Architecture': 'amd64'}))
 elif args[0] == 'compose':
     app = Path(os.environ['APP_DIR'])
     assert args[-1] == 'bot'
@@ -356,7 +443,7 @@ elif args[0] == 'compose':
     elif 'ps' in args:
         print('f' * 64)
 elif args[0] == 'inspect':
-    print('running|healthy|0|' + state['image'])
+    print('running|healthy|0|' + state['image'] + '|1000000000|1073741824|128')
 path.write_text(json.dumps(state))
 '''
         for name in ('git', 'docker'):
@@ -365,7 +452,7 @@ path.write_text(json.dumps(state))
         # Production uses absolute trusted binaries. This test-only loader swaps constants,
         # never adds a production environment/executable override escape hatch.
         runner = tools / 'runner.py'
-        runner.write_text('import importlib.util\nfrom pathlib import Path\nspec=importlib.util.spec_from_file_location("fixture_deploy", ' + repr(str(ROOT / 'deploy/deploy.py')) + ')\nd=importlib.util.module_from_spec(spec)\nspec.loader.exec_module(d)\nd.EXECUTABLES={"git": ' + repr(str(tools / 'git')) + ', "docker": ' + repr(str(tools / 'docker')) + '}\nraise SystemExit(d.main())\n')
+        runner.write_text('import importlib.util\nfrom pathlib import Path\nspec=importlib.util.spec_from_file_location("fixture_deploy", ' + repr(str(ROOT / 'deploy/deploy.py')) + ')\nd=importlib.util.module_from_spec(spec)\nspec.loader.exec_module(d)\nd.Deployer.verify_signature=lambda self, digest: None\nd.EXECUTABLES={"git": ' + repr(str(tools / 'git')) + ', "docker": ' + repr(str(tools / 'docker')) + '}\nraise SystemExit(d.main())\n')
         env = {**os.environ, 'APP_DIR': str(self.app), 'FIXTURE_STATE': str(fixture_state)}
         result = subprocess.run(['python3', str(runner), '--sha', SHA_B, '--digest', DIGEST_B], env=env, capture_output=True, text=True, timeout=25)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -377,7 +464,8 @@ path.write_text(json.dumps(state))
         self.assertEqual(result.returncode, 0)
         self.assertIn('unchanged_healthy', result.stdout)
 
-    def test_interrupted_initial_config_and_commit_cleanup_failure(self):
+    def test_interrupted_config_and_commit_cleanup_failure_with_signed_anchor(self):
+        self.existing()
         original_atomic = d.atomic
         failed = False
         def interrupt_config(path, value):
@@ -389,9 +477,10 @@ path.write_text(json.dumps(state))
         with patch.object(d, 'atomic', interrupt_config), patch.object(d, 'Deployer', lambda _env: self.fake), patch('sys.argv', ['deploy.py', '--sha', SHA_B, '--digest', DIGEST_B]), contextlib.redirect_stdout(io.StringIO()) as output:
             self.assertEqual(d.main(), 1)
         self.assertNotIn('private detail', output.getvalue())
-        self.assertIn('failed_initial_no_rollback', output.getvalue())
+        self.assertIn('failed_rollback_confirmed', output.getvalue())
         self.assertFalse((self.app / 'state/pending.json').exists())
-        self.assertTrue(self.fake.stopped)
+        self.assertFalse(self.fake.stopped)
+        self.assertEqual(self.fake.running, DIGEST_A)
         self.existing()
         def interrupt_commit(path, value):
             original_atomic(path, value)
@@ -569,7 +658,7 @@ class InstallAndContracts(unittest.TestCase):
         self.assertIn('"node", "dist/slack.js"', dockerfile)
         self.assertNotIn('COPY .', dockerfile)
         compose = (ROOT / 'deploy/compose.yaml').read_text()
-        for value in ['restart: unless-stopped', 'init: true', 'read_only: true', 'cap_drop: [ALL]', 'format: raw', 'max-size:', 'max-file:']:
+        for value in ['cpus: 1.0', 'mem_limit: 1g', 'pids_limit: 128', 'restart: unless-stopped', 'init: true', 'read_only: true', 'cap_drop: [ALL]', 'format: raw', 'max-size:', 'max-file:']:
             self.assertIn(value, compose)
         self.assertNotIn('ports:', compose)
         self.assertNotIn('docker.sock', compose)

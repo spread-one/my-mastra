@@ -2,6 +2,7 @@
 """Explicit SHA/digest deployment invoked by an authenticated fixed wrapper; no host build."""
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -18,6 +19,11 @@ IMAGE = 'ghcr.io/spread-one/my-mastra'
 SHA = re.compile(r'[0-9a-f]{40}')
 DIGEST = re.compile(re.escape(IMAGE) + r'@sha256:[0-9a-f]{64}')
 EXECUTABLES = {'git': '/usr/bin/git', 'docker': '/usr/bin/docker'}
+COSIGN = Path('/opt/samkim/cosign')
+COSIGN_VERSION = 'v2.6.5'
+COSIGN_SHA256 = 'c3b4f5410e608af03a5eb0aaac84a4313d8da131248e08ff1759ac70c79d1644'
+ISSUER = 'https://token.actions.githubusercontent.com'
+IDENTITY = SOURCE + '/.github/workflows/ci.yml@refs/heads/main'
 ENV_KEYS = {'DEEPSEEK_API_KEY', 'DEEPSEEK_MODEL', 'EXA_API_KEY', 'SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN'}
 
 
@@ -104,6 +110,7 @@ class Deployer:
         self.changed = False
         self.old = None
         self.candidate = None
+        self.verified = set()
 
     def command(self, args, seconds=20):
         seconds = min(seconds, self.deadline - time.monotonic())
@@ -119,6 +126,55 @@ class Deployer:
             return result.stdout.strip()
         except (OSError, subprocess.TimeoutExpired):
             raise Failed('command_failed') from None
+
+    def verify_signature(self, digest):
+        if not isinstance(digest, str) or not DIGEST.fullmatch(digest):
+            raise Failed('signature_digest_invalid')
+        if digest in self.verified:
+            return
+        try:
+            # No symlinks, including parents; root is the executable trust boundary.
+            for parent in COSIGN.parents:
+                info = parent.lstat()
+                if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+                    raise Failed('verifier_untrusted')
+            info = COSIGN.lstat()
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+                    or stat.S_IMODE(info.st_mode) != 0o700
+                    or hashlib.sha256(COSIGN.read_bytes()).hexdigest() != COSIGN_SHA256):
+                raise Failed('verifier_untrusted')
+            # Never inherit COSIGN/SIGSTORE/proxy/trust-store/registry policy overrides.
+            env = {key: self.command_env[key] for key in ('HOME', 'DOCKER_CONFIG') if key in self.command_env}
+            env.update(PATH='/usr/bin:/bin', LANG='C.UTF-8')
+            for args, budget in [(['version', '--json'], 5),
+                                 (['verify', '--certificate-identity', IDENTITY,
+                                   '--certificate-oidc-issuer', ISSUER, '--output', 'json', digest], 20)]:
+                seconds = min(budget, self.deadline - time.monotonic())
+                if seconds <= 0:
+                    raise Failed('signature_timeout')
+                result = subprocess.run([str(COSIGN), *args], capture_output=True, timeout=seconds,
+                                        env=env, cwd='/', text=True)
+                if result.returncode:
+                    raise Failed('signature_verification_failed')
+                value = json.loads(result.stdout)
+                if args[0] == 'version':
+                    if value.get('gitVersion') != COSIGN_VERSION:
+                        raise Failed('verifier_version_invalid')
+                else:
+                    # Cosign validates signature/certificate/tlog; bind verified payload too.
+                    if not isinstance(value, list) or not value:
+                        raise Failed('signature_payload_invalid')
+                    for entry in value:
+                        critical = entry['critical']
+                        if (critical['type'] != 'cosign container image signature'
+                                or critical['image']['docker-manifest-digest'] != digest.split('@')[1]
+                                or critical['identity']['docker-reference'] != IMAGE):
+                            raise Failed('signature_payload_invalid')
+            self.verified.add(digest)
+        except Failed:
+            raise
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.TimeoutExpired):
+            raise Failed('signature_verification_failed') from None
 
     def head(self):
         # Public Git smart protocol; single bounded lookup, no PAT/API rate-limit credentials.
@@ -142,7 +198,7 @@ class Deployer:
             info = json.loads(text)
             labels = info['Config']['Labels']
             if labels.get('org.opencontainers.image.source') != SOURCE or labels.get('org.opencontainers.image.revision') != sha:
-                raise Failed('image_provenance_invalid')
+                raise Failed('image_metadata_labels_invalid')
             if info.get('Os') != 'linux' or info.get('Architecture') != 'amd64':
                 raise Failed('image_platform_invalid')
             digests = [digest for digest in info.get('RepoDigests', []) if DIGEST.fullmatch(digest)]
@@ -161,8 +217,8 @@ class Deployer:
         if not re.fullmatch(r'[0-9a-f]{12,64}', cid):
             return False
         result = self.command(['docker', 'inspect', '--format',
-                               '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}|{{.RestartCount}}|{{.Config.Image}}', cid])
-        return result == 'running|healthy|0|' + record['digest']
+                               '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}|{{.RestartCount}}|{{.Config.Image}}|{{.HostConfig.NanoCpus}}|{{.HostConfig.Memory}}|{{.HostConfig.PidsLimit}}', cid])
+        return result == 'running|healthy|0|' + record['digest'] + '|1000000000|1073741824|128'
 
     def wait_healthy(self, record):
         # Three healthy samples over >=10 seconds, zero restarts; not merely process alive.
@@ -180,6 +236,7 @@ class Deployer:
 
     def activate(self, record):
         valid_record(record)
+        self.verify_signature(record['digest'])
         text = env_text(APP / 'state' / record['snapshot'])
         atomic(APP / '.env.runtime', text)
         atomic(APP / 'image.env', 'BOT_IMAGE=' + record['digest'] + '\n')
@@ -221,47 +278,59 @@ class Deployer:
         candidate = valid_record(journal['candidate'])
         old = journal.get('previous')
         state_path = APP / 'state' / 'deployed.json'
-        state = read_json(state_path) if state_path.exists() else None
+        if not old or not state_path.exists():
+            raise Failed('recovery_anchor_required')
+        valid_record(old)
+        state = valid_record(read_json(state_path))
         # Successful atomic commit wins, even if a crash preceded journal removal.
         if state and all(state.get(key) == candidate[key] for key in ('sha', 'digest', 'snapshot')):
+            self.verify_signature(candidate['digest'])
             pending.unlink()
             return 'committed'
         # Never allow an old transaction to roll back a newer successful deployment.
         if state and (not old or any(state.get(key) != old.get(key) for key in ('sha', 'digest', 'snapshot'))):
             raise Failed('recovery_state_conflict')
-        if old:
-            self.activate(valid_record(old))
-            atomic(APP / 'state' / 'status.json', {'status': 'rolled_back', 'sha': old['sha'], 'digest': old['digest']})
-        else:
-            # Activation may have been interrupted before image.env existed.
-            atomic(APP / 'image.env', 'BOT_IMAGE=' + candidate['digest'] + '\n')
-            atomic(APP / '.env.runtime', env_text(APP / 'state' / candidate['snapshot']))
-            # No previous healthy deployment: stop only this bot, retain explicit failure.
-            self.compose('stop', 'bot')
-            atomic(APP / 'state' / 'status.json', {'status': 'failed_initial_no_rollback'})
+        self.activate(old)
+        atomic(APP / 'state' / 'status.json', {'status': 'rolled_back', 'sha': old['sha'], 'digest': old['digest']})
         pending.unlink()
-        return 'rolled_back' if old else 'failed_initial_no_rollback'
+        return 'rolled_back'
 
     def run(self, sha=None, digest=None, force=False, rollback=False):
         if not rollback and (not isinstance(sha, str) or not SHA.fullmatch(sha) or not isinstance(digest, str) or not DIGEST.fullmatch(digest)):
             raise Failed('candidate_invalid')
-        self.recover()
+        # State is an owner-established signed healthy anchor, not an optional
+        # hint. Check before recovery too: --force or an orphan journal must not
+        # turn state deletion into an implicit bootstrap/initial-stop path.
         state_path = APP / 'state' / 'deployed.json'
-        state = read_json(state_path) if state_path.exists() else None
-        if state:
-            valid_record(state)
+        if not state_path.exists():
+            raise Failed('deployment_anchor_required')
+        valid_record(read_json(state_path))
+        self.recover()
+        state = valid_record(read_json(state_path))
         self.old = {key: state[key] for key in ('sha', 'digest', 'snapshot')} if state else None
         if rollback:
             if not state or not state.get('previous'):
                 raise Failed('no_previous_deployment')
             self.candidate = valid_record(state['previous'])
             env_text(APP / 'state' / self.candidate['snapshot'])
+            self.verify_signature(self.candidate['digest'])
+            if self.old:
+                self.verify_signature(self.old['digest'])
+                env_text(APP / 'state' / self.old['snapshot'])
+                self.inspect_image(self.old['digest'], self.old['sha'])
             self.inspect_image(self.candidate['digest'], self.candidate['sha'])
         else:
             # Values stay host-only. Actions supplies only the public SHA and immutable digest.
             text = env_text(APP / '.env')
             if self.head() != sha:
                 raise Failed('candidate_not_main')
+            # Both candidate and rollback anchor must authenticate before any mutable
+            # runtime/state transaction. An unsigned healthy current is NOT an exception.
+            self.verify_signature(digest)
+            if self.old:
+                self.verify_signature(self.old['digest'])
+                env_text(APP / 'state' / self.old['snapshot'])
+                self.inspect_image(self.old['digest'], self.old['sha'])
             if state and state['sha'] == sha and state['digest'] == digest and not force and self.health(state):
                 print('deploy unchanged_healthy')
                 self.maintenance()
@@ -366,7 +435,8 @@ def prepare():
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
         raise Failed('app_dir_permissions')
     state = APP / 'state'
-    state.mkdir(mode=0o700, exist_ok=True)
+    # No implicit bootstrap: state directory/healthy record must already be
+    # established by the separately approved owner anchor transition.
     info = state.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
         raise Failed('state_dir_permissions')
@@ -404,6 +474,9 @@ def main():
                 env.update(HOME=config, DOCKER_CONFIG=config, DOCKER_HOST='unix:///var/run/docker.sock',
                            GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null', GIT_TERMINAL_PROMPT='0')
                 deployer = Deployer(env)
+                if (APP / 'install-pending.json').exists() or (APP / 'install-pending.json').is_symlink():
+                    print('deploy blocked_installer_recovery_required')
+                    return 1
                 # Interruptions attempt rollback under the same lock; hard kills recover next invocation.
                 def terminated(_signum, _frame):
                     raise Failed('deployment_interrupted')
@@ -423,12 +496,13 @@ def main():
                             if recovered == 'committed':
                                 print('deploy committed_recovery')
                             else:
-                                print('deploy failed_rollback_confirmed' if deployer.old else 'deploy failed_initial_no_rollback')
+                                print('deploy failed_rollback_confirmed')
                         except (Failed, OSError, ValueError, KeyError, TypeError):
                             atomic(APP / 'state' / 'status.json', {'status': 'failed_rollback_unconfirmed'})
                             print('deploy failed_rollback_unconfirmed')
                     elif (APP / 'state' / 'pending.json').exists():
-                        atomic(APP / 'state' / 'status.json', {'status': 'failed_recovery_unconfirmed'})
+                        # A pre-activation verification failure must preserve the journal
+                        # AND status; do not disguise unsigned/unavailable recovery as success.
                         print('deploy failed_recovery_unconfirmed')
                     else:
                         print('deploy blocked_existing_unchanged')

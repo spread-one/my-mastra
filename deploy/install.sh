@@ -28,8 +28,11 @@ if [[ -z "$STAGE" ]]; then
 fi
 export STAGE SOURCE_DIR
 /usr/bin/python3 -I - <<'PY'
+import fcntl
+import json
 import os
 from pathlib import Path
+import runpy
 import stat
 import tempfile
 
@@ -53,21 +56,106 @@ if target.exists():
 target.mkdir(parents=True, mode=0o700, exist_ok=True)
 wrapper.parent.mkdir(parents=True, exist_ok=True)
 sudoers.parent.mkdir(parents=True, exist_ok=True)
-def replace(dest, text, mode):
-    if dest.is_symlink():
-        raise SystemExit('install symlink_file')
-    fd, name = tempfile.mkstemp(prefix='.install-', dir=dest.parent)
+# This persistent inode is shared with ALL deployment/recovery invocations.
+lock_path = target / 'deploy.lock'
+if lock_path.exists() or lock_path.is_symlink():
+    info = lock_path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+        raise SystemExit('install lock_untrusted')
+fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+with os.fdopen(fd, 'w') as lock:
     try:
-        with os.fdopen(fd, 'w') as out:
-            out.write(text)
-        os.chmod(name, mode)
-        os.replace(name, dest)
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise SystemExit('install locked_busy')
+    marker = target / 'install-pending.json'
+    if marker.exists() or marker.is_symlink():
+        raise SystemExit('install interrupted_owner_recovery_required')
+    pending = target / 'state/pending.json'
+    if pending.exists() or pending.is_symlink():
+        raise SystemExit('install deployment_recovery_required')
+    changes = [(target / name, (source / name).read_bytes(), 0o600)
+               for name in ('deploy.py', 'compose.yaml')]
+    changes += [(wrapper, (source / 'samkim-deploy').read_bytes(), 0o755),
+                (sudoers, (source / 'samkim-deploy.sudoers').read_bytes(), 0o440)]
+    # Stage mode is templates-only: never downloads/executes a verifier or touches host.
+    if not stage:
+        helper = runpy.run_path(str(source / 'cosign_download.py'))
+        data = helper['fetch_binary']()
+        with tempfile.TemporaryDirectory(prefix='.verifier-', dir=target) as directory:
+            binary = Path(directory) / 'cosign'
+            binary.write_bytes(data)
+            binary.chmod(0o700)
+            helper['check_version'](binary)
+        changes.append((target / 'cosign', data, 0o700))
+    # Complete destination preflight BEFORE the first replacement; snapshot trusted bytes.
+    previous = {}
+    for dest, data, mode in changes:
+        if dest.exists() or dest.is_symlink():
+            info = dest.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
+                raise SystemExit('install symlink_or_untrusted_file')
+            previous[dest] = (dest.read_bytes(), stat.S_IMODE(info.st_mode))
+        else:
+            previous[dest] = None
+    backup = target / 'install-backup'
+    if backup.exists() or backup.is_symlink():
+        raise SystemExit('install backup_owner_review_required')
+    backup.mkdir(mode=0o700)
+    def durable(dest, data, mode):
+        fd, name = tempfile.mkstemp(prefix='.install-', dir=dest.parent)
+        try:
+            with os.fdopen(fd, 'wb') as out:
+                out.write(data)
+                out.flush()
+                os.fsync(out.fileno())
+            os.chmod(name, mode)
+            os.replace(name, dest)
+            directory = os.open(dest.parent, os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            if os.path.exists(name):
+                os.unlink(name)
+    for index, (dest, _, _) in enumerate(changes):
+        if previous[dest]:
+            durable(backup / str(index), previous[dest][0], 0o600)
+    journal = [{'path': str(dest), 'backup': str(index) if previous[dest] else None,
+                'mode': previous[dest][1] if previous[dest] else None}
+               for index, (dest, _, _) in enumerate(changes)]
+    durable(marker, (json.dumps(journal) + '\n').encode(), 0o600)
+    try:
+        for dest, data, mode in changes:
+            durable(dest, data, mode)
+    except BaseException:
+        # Normal errors restore the whole reviewed boundary, not half an upgrade.
+        # A kill/power failure leaves marker + durable backup: deploy refuses to run.
+        for dest, _, _ in changes:
+            if previous[dest]:
+                durable(dest, previous[dest][0], previous[dest][1])
+            elif dest.exists():
+                dest.unlink()
+                directory = os.open(dest.parent, os.O_DIRECTORY)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
+        marker.unlink()
+        directory = os.open(target, os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+        raise
+    marker.unlink()
+    directory = os.open(target, os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
     finally:
-        if os.path.exists(name):
-            os.unlink(name)
-for name in ('deploy.py', 'compose.yaml'):
-    replace(target / name, (source / name).read_text(), 0o600)
-replace(wrapper, (source / 'samkim-deploy').read_text(), 0o755)
-replace(sudoers, (source / 'samkim-deploy.sudoers').read_text(), 0o440)
-print('install fixed_templates_ready_app_not_started')
+        os.close(directory)
+    # Preserve the previous templates/verifier for OWNER review/manual recovery.
+    # No secret/env/state files were included. Remove/move backup before another upgrade.
+    print('install fixed_templates_ready_app_not_started')
 PY
