@@ -179,6 +179,32 @@ class Graph:
             self.read(digest)
         if set(self.nodes) - set(versions):
             raise Deferred('graph_version_missing')
+        # Cosign v2 stores signatures at sha256-<subject>.sig (legacy .att too).
+        # Treat these as FOREIGN roots, not deletion ownership. A retained signature
+        # must also protect its subject's recursive graph, even outside the top ten.
+        for digest, version in versions.items():
+            for tag in version['tags']:
+                match = re.fullmatch(r'sha256-([0-9a-f]{64})\.(sig|att)', tag)
+                if match:
+                    subject = 'sha256:' + match[1]
+                    if subject not in self.nodes or subject == digest:
+                        raise Deferred('signature_subject_missing_or_invalid')
+                    self.nodes[digest]['children'].append(subject)
+        # Association edges can introduce cycles independent of OCI descriptors.
+        self.depths = {}
+        for digest in self.nodes:
+            self.check_cycles(digest, set())
+
+    def check_cycles(self, digest, ancestors):
+        if digest in ancestors or len(ancestors) > 32:
+            raise Deferred('graph_cycle_or_depth')
+        if digest not in self.depths:
+            depth = max([0, *[1 + self.check_cycles(child, ancestors | {digest})
+                              for child in self.nodes[digest]['children']]])
+            if depth > 32:
+                raise Deferred('graph_cycle_or_depth')
+            self.depths[digest] = depth
+        return self.depths[digest]
 
     def read(self, digest, depth=0):
         if digest in self.visiting or depth > 32:

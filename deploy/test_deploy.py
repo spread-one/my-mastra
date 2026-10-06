@@ -43,11 +43,18 @@ class Fake(d.Deployer):
         self.running = DIGEST_A
         self.ready = True
         self.restarts = 0
+        self.limits = '1000000000|1073741824|128'
         self.fail_pull = False
         self.fail_network = False
         self.fail_candidate = False
         self.fail_rollback = False
         self.stopped = False
+
+    def verify_signature(self, digest):
+        # Synthetic accepted Cosign path; security fixtures exercise real method below.
+        if digest in getattr(self, 'unsigned', set()):
+            raise d.Failed('signature_verification_failed')
+        self.verified.add(digest)
 
     def run(self, sha=SHA_B, digest=DIGEST_B, force=False, rollback=False):
         return super().run(sha, digest, force, rollback)
@@ -82,7 +89,7 @@ class Fake(d.Deployer):
             return ''
         if args[1] == 'inspect':
             ready = self.ready and not (self.fail_candidate and self.running == DIGEST_B) and not (self.fail_rollback and self.running == DIGEST_A)
-            return f'running|{"healthy" if ready else "unhealthy"}|{self.restarts}|{self.running}'
+            return f'running|{"healthy" if ready else "unhealthy"}|{self.restarts}|{self.running}|{self.limits}'
         raise AssertionError('unexpected command')
 
     @staticmethod
@@ -191,6 +198,15 @@ class DeployTests(unittest.TestCase):
         with self.assertRaises(d.Failed):
             self.fake.run()
         self.assertEqual(self.fake.running, DIGEST_A)
+
+    def test_missing_resource_limits_not_healthy_or_unchanged(self):
+        record = self.existing()
+        self.assertTrue(self.fake.health(record))
+        for limits in ['0|0|0', '1000000000|0|128', '0|1073741824|128', '1000000000|1073741824|0']:
+            self.fake.limits = limits
+            self.assertFalse(self.fake.health(record))
+        self.fake.limits = '1000000000|1073741824|128'
+        self.assertTrue(self.fake.health(record))
 
     def test_stale_head_before_activation_never_replaces(self):
         self.existing()
@@ -356,7 +372,7 @@ elif args[0] == 'compose':
     elif 'ps' in args:
         print('f' * 64)
 elif args[0] == 'inspect':
-    print('running|healthy|0|' + state['image'])
+    print('running|healthy|0|' + state['image'] + '|1000000000|1073741824|128')
 path.write_text(json.dumps(state))
 '''
         for name in ('git', 'docker'):
@@ -365,7 +381,7 @@ path.write_text(json.dumps(state))
         # Production uses absolute trusted binaries. This test-only loader swaps constants,
         # never adds a production environment/executable override escape hatch.
         runner = tools / 'runner.py'
-        runner.write_text('import importlib.util\nfrom pathlib import Path\nspec=importlib.util.spec_from_file_location("fixture_deploy", ' + repr(str(ROOT / 'deploy/deploy.py')) + ')\nd=importlib.util.module_from_spec(spec)\nspec.loader.exec_module(d)\nd.EXECUTABLES={"git": ' + repr(str(tools / 'git')) + ', "docker": ' + repr(str(tools / 'docker')) + '}\nraise SystemExit(d.main())\n')
+        runner.write_text('import importlib.util\nfrom pathlib import Path\nspec=importlib.util.spec_from_file_location("fixture_deploy", ' + repr(str(ROOT / 'deploy/deploy.py')) + ')\nd=importlib.util.module_from_spec(spec)\nspec.loader.exec_module(d)\nd.Deployer.verify_signature=lambda self, digest: None\nd.EXECUTABLES={"git": ' + repr(str(tools / 'git')) + ', "docker": ' + repr(str(tools / 'docker')) + '}\nraise SystemExit(d.main())\n')
         env = {**os.environ, 'APP_DIR': str(self.app), 'FIXTURE_STATE': str(fixture_state)}
         result = subprocess.run(['python3', str(runner), '--sha', SHA_B, '--digest', DIGEST_B], env=env, capture_output=True, text=True, timeout=25)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -569,7 +585,7 @@ class InstallAndContracts(unittest.TestCase):
         self.assertIn('"node", "dist/slack.js"', dockerfile)
         self.assertNotIn('COPY .', dockerfile)
         compose = (ROOT / 'deploy/compose.yaml').read_text()
-        for value in ['restart: unless-stopped', 'init: true', 'read_only: true', 'cap_drop: [ALL]', 'format: raw', 'max-size:', 'max-file:']:
+        for value in ['cpus: 1.0', 'mem_limit: 1g', 'pids_limit: 128', 'restart: unless-stopped', 'init: true', 'read_only: true', 'cap_drop: [ALL]', 'format: raw', 'max-size:', 'max-file:']:
             self.assertIn(value, compose)
         self.assertNotIn('ports:', compose)
         self.assertNotIn('docker.sock', compose)

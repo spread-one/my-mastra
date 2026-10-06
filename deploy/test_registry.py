@@ -85,6 +85,30 @@ class GraphGC(unittest.TestCase):
         with patch.object(gc.time, 'time', lambda: NOW):
             return gc.cleanup(self.registry, HEAD)
 
+    def test_cosign_signature_and_attestation_tags_protect_subject_graph(self):
+        child = self.registry.image('1' * 40, tagged=False, age=90 * 86400)
+        root = self.registry.index([child], ['sha-' + '1' * 40], age=90 * 86400)
+        self.registry.fill()
+        for extension in ['sig', 'att']:
+            signature = self.registry.image(('a' if extension == 'sig' else 'b') * 40, source='foreign', os='unknown')
+            self.registry.rows[signature]['tags'] = ['sha256-' + root[7:] + '.' + extension]
+        report = self.run_cleanup()
+        self.assertEqual(report['status'], 'complete')
+        for protected in [root, child, signature]:
+            self.assertIn(protected, self.registry.rows)
+        self.assertFalse(set(self.registry.deleted) & {root, child, signature})
+
+    def test_signature_missing_subject_and_oci_referrers_defer_all_deletion(self):
+        self.registry.fill()
+        signature = self.registry.image('a' * 40, source='foreign', os='unknown')
+        self.registry.rows[signature]['tags'] = ['sha256-' + '0' * 64 + '.sig']
+        self.assertEqual(self.run_cleanup()['reason'], 'signature_subject_missing_or_invalid')
+        self.assertEqual(self.registry.deleted, [])
+        self.registry.rows[signature]['tags'] = ['foreign-artifact']
+        self.registry.nodes[signature]['subject'] = {'digest': next(iter(self.registry.rows))}
+        self.assertEqual(self.run_cleanup()['reason'], 'graph_unsupported')
+        self.assertEqual(self.registry.deleted, [])
+
     def test_recent_ten_and_grace_main_are_protected(self):
         roots = self.registry.fill()
         grace = self.registry.image('e' * 40, age=1)
