@@ -62,7 +62,7 @@ class Docker(d.Deployer):
 class Retention(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='retention-')
-        app = Path(self.temp.name).resolve() / 'apps/my-mastra'
+        app = Path(self.temp.name).resolve() / 'opt/samkim'
         app.mkdir(parents=True, mode=0o700)
         self.app = app
         self.override = patch.object(d, 'APP', app)

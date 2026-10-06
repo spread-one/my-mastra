@@ -25,7 +25,7 @@ class AuthBoundary(unittest.TestCase):
             recorder.write_text('#!/usr/bin/env python3\nimport json, os, sys\nprint(json.dumps({"args": sys.argv[1:], "env": dict(os.environ)}))\n')
             recorder.chmod(0o700)
             source = (ROOT / 'deploy/samkim-deploy').read_text()
-            fixed = '/usr/bin/timeout --signal=TERM --kill-after=110s 240s \\\n  /usr/bin/python3 -I /srv/selfhost/apps/my-mastra/deploy.py'
+            fixed = '/usr/bin/timeout --signal=TERM --kill-after=110s 240s \\\n  /usr/bin/python3 -I /opt/samkim/deploy.py'
             self.assertIn(fixed, source)
             # Only the final fixed executable is mocked; original validator/env -i still executes.
             source = source.replace(fixed, str(recorder))
