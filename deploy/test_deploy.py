@@ -116,6 +116,7 @@ class DeployTests(unittest.TestCase):
         self.sleep_patch = patch.object(d.time, 'sleep', self.clock.sleep)
         self.time_patch.start()
         self.sleep_patch.start()
+        (self.app / 'state').mkdir(mode=0o700)
         d.prepare()
         d.atomic(self.app / '.env', ENV)
         self.fake = Fake()
@@ -199,6 +200,70 @@ class DeployTests(unittest.TestCase):
             self.fake.run()
         self.assertEqual(self.fake.running, DIGEST_A)
 
+    def test_absent_state_managed_unmanaged_force_and_orphan_pending_preserve_all_bytes(self):
+        for running in [DIGEST_A, 'unmanaged/healthy:image']:
+            for force in [False, True]:
+                for pending_kind in [None, 'no_previous', 'has_previous']:
+                    with self.subTest(running=running, force=force, pending=pending_kind):
+                        pending = self.app / 'state/pending.json'
+                        if pending.exists():
+                            pending.unlink()
+                        self.fake.running = running
+                        self.fake.commands.clear()
+                        d.atomic(self.app / 'image.env', 'existing-runtime-image')
+                        d.atomic(self.app / '.env.runtime', 'existing-runtime-env')
+                        d.atomic(self.app / 'state/status.json', {'status': 'existing-healthy'})
+                        if pending_kind:
+                            d.atomic(pending, {'candidate': {'sha': SHA_B, 'digest': DIGEST_B, 'snapshot': 'env-candidate'},
+                                              'previous': {'sha': SHA_A, 'digest': DIGEST_A, 'snapshot': 'env-old'} if pending_kind == 'has_previous' else None})
+                        before = {p: p.read_bytes() for p in self.app.rglob('*') if p.is_file()}
+                        with self.assertRaisesRegex(d.Failed, 'deployment_anchor_required'):
+                            self.fake.run(force=force)
+                        self.assertEqual(before, {p: p.read_bytes() for p in self.app.rglob('*') if p.is_file()})
+                        self.assertEqual(self.fake.running, running)
+                        self.assertFalse(self.fake.commands)  # No pull/up/stop/verify/recovery.
+                        self.assertFalse(self.fake.verified)
+                        if pending_kind:
+                            with self.assertRaisesRegex(d.Failed, 'recovery_anchor_required'):
+                                self.fake.recover()
+                            self.assertEqual(before, {p: p.read_bytes() for p in self.app.rglob('*') if p.is_file()})
+                            self.assertFalse(self.fake.commands)
+                            self.assertEqual(self.fake.running, running)
+
+    def test_cli_missing_state_and_state_directory_never_bootstraps(self):
+        d.atomic(self.app / 'image.env', 'existing-runtime-image')
+        d.atomic(self.app / '.env.runtime', 'existing-runtime-env')
+        for directory_exists in [True, False]:
+            if not directory_exists:
+                (self.app / 'state').rmdir()
+            for flags in [[], ['--force'], ['--rollback']]:
+                with self.subTest(state_dir=directory_exists, flags=flags):
+                    before = {p: p.read_bytes() for p in self.app.rglob('*') if p.is_file()}
+                    output = io.StringIO()
+                    with patch.object(d, 'Deployer', lambda _env: self.fake), patch('sys.argv', ['deploy.py', '--sha', SHA_B, '--digest', DIGEST_B, *flags]), contextlib.redirect_stdout(output):
+                        self.assertEqual(d.main(), 1)
+                    after = {p: p.read_bytes() for p in self.app.rglob('*') if p.is_file()}
+                    # A persistent coordination lock can be created, not app/state data.
+                    before.pop(self.app / 'deploy.lock', None)
+                    after.pop(self.app / 'deploy.lock', None)
+                    self.assertEqual(before, after)
+                    self.assertEqual((self.app / 'state').exists(), directory_exists)
+                    self.assertFalse(self.fake.commands)
+                    self.assertFalse(self.fake.stopped)
+                    self.assertEqual(self.fake.running, DIGEST_A)
+
+    def test_orphan_pending_no_previous_cannot_modify_even_with_committed_state(self):
+        record = self.existing()
+        d.atomic(self.app / 'state/pending.json', {'candidate': record, 'previous': None})
+        before = {p: p.read_bytes() for p in self.app.rglob('*') if p.is_file()}
+        for action in [self.fake.recover, lambda: self.fake.run(), lambda: self.fake.run(force=True)]:
+            with self.assertRaisesRegex(d.Failed, 'recovery_anchor_required'):
+                action()
+            self.assertEqual(before, {p: p.read_bytes() for p in self.app.rglob('*') if p.is_file()})
+            self.assertFalse(self.fake.commands)
+            self.assertFalse(self.fake.stopped)
+            self.assertEqual(self.fake.running, DIGEST_A)
+
     def test_missing_resource_limits_not_healthy_or_unchanged(self):
         record = self.existing()
         self.assertTrue(self.fake.health(record))
@@ -240,14 +305,17 @@ class DeployTests(unittest.TestCase):
         self.assertEqual(self.state()['sha'], SHA_A)
         self.assertFalse((self.app / 'state/pending.json').exists())
 
-    def test_restarts_are_not_readiness_and_initial_failure_stops_only_bot(self):
+    def test_restarts_are_not_readiness_and_signed_anchor_recovery_never_stops_bot(self):
+        self.existing()
         self.fake.restarts = 1
         with self.assertRaisesRegex(d.Failed, 'readiness_failed'):
             self.fake.run()
+        self.fake.restarts = 0
         self.fake.recover()
-        self.assertFalse((self.app / 'state/deployed.json').exists())
-        self.assertTrue(self.fake.stopped)
-        self.assertEqual(json.loads((self.app / 'state/status.json').read_text())['status'], 'failed_initial_no_rollback')
+        self.assertEqual(self.state()['sha'], SHA_A)
+        self.assertEqual(self.fake.running, DIGEST_A)
+        self.assertFalse(self.fake.stopped)
+        self.assertFalse(any('stop' in command for command in self.fake.commands))
 
     def test_rollback_failure_keeps_pending_and_can_recover_next_poll(self):
         self.existing()
@@ -312,7 +380,7 @@ class DeployTests(unittest.TestCase):
         info = SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=os.geteuid())
         with patch.object(d, 'APP', app), patch.object(Path, 'resolve', autospec=True, side_effect=lambda path: path), patch.object(Path, 'lstat', return_value=info), patch.object(Path, 'mkdir') as mkdir, patch.object(Path, 'exists', return_value=False), patch.object(Path, 'is_symlink', return_value=False):
             d.prepare()
-            mkdir.assert_called_once_with(mode=0o700, exist_ok=True)
+            mkdir.assert_not_called()
         for mode, uid in [(0o755, os.geteuid()), (0o700, os.geteuid() + 1)]:
             bad = SimpleNamespace(st_mode=stat.S_IFDIR | mode, st_uid=uid)
             with patch.object(d, 'APP', app), patch.object(Path, 'resolve', return_value=app), patch.object(Path, 'lstat', return_value=bad), self.assertRaisesRegex(d.Failed, 'app_dir_permissions'):
@@ -346,6 +414,7 @@ class DeployTests(unittest.TestCase):
         self.assertEqual(self.state()['sha'], SHA_A)
 
     def test_real_cli_with_fake_git_and_docker_binaries(self):
+        self.existing()
         tools = Path(self.temp.name).resolve() / 'tools'
         tools.mkdir()
         fixture_state = tools / 'fixture.json'
@@ -360,7 +429,9 @@ state['commands'].append([Path(sys.argv[0]).name, *args])
 if Path(sys.argv[0]).name == 'git':
     print(state['sha'] + '\\trefs/heads/main')
 elif args[:2] == ['image', 'inspect']:
-    print(json.dumps({'Config': {'Labels': {'org.opencontainers.image.source': 'https://github.com/spread-one/my-mastra', 'org.opencontainers.image.revision': state['sha']}}, 'RepoDigests': [state['digest']], 'Os': 'linux', 'Architecture': 'amd64'}))
+    digest = args[-1] if '@sha256:' in args[-1] else state['digest']
+    revision = 'a' * 40 if digest.endswith('1' * 64) else state['sha']
+    print(json.dumps({'Config': {'Labels': {'org.opencontainers.image.source': 'https://github.com/spread-one/my-mastra', 'org.opencontainers.image.revision': revision}}, 'RepoDigests': [digest], 'Os': 'linux', 'Architecture': 'amd64'}))
 elif args[0] == 'compose':
     app = Path(os.environ['APP_DIR'])
     assert args[-1] == 'bot'
@@ -393,7 +464,8 @@ path.write_text(json.dumps(state))
         self.assertEqual(result.returncode, 0)
         self.assertIn('unchanged_healthy', result.stdout)
 
-    def test_interrupted_initial_config_and_commit_cleanup_failure(self):
+    def test_interrupted_config_and_commit_cleanup_failure_with_signed_anchor(self):
+        self.existing()
         original_atomic = d.atomic
         failed = False
         def interrupt_config(path, value):
@@ -405,9 +477,10 @@ path.write_text(json.dumps(state))
         with patch.object(d, 'atomic', interrupt_config), patch.object(d, 'Deployer', lambda _env: self.fake), patch('sys.argv', ['deploy.py', '--sha', SHA_B, '--digest', DIGEST_B]), contextlib.redirect_stdout(io.StringIO()) as output:
             self.assertEqual(d.main(), 1)
         self.assertNotIn('private detail', output.getvalue())
-        self.assertIn('failed_initial_no_rollback', output.getvalue())
+        self.assertIn('failed_rollback_confirmed', output.getvalue())
         self.assertFalse((self.app / 'state/pending.json').exists())
-        self.assertTrue(self.fake.stopped)
+        self.assertFalse(self.fake.stopped)
+        self.assertEqual(self.fake.running, DIGEST_A)
         self.existing()
         def interrupt_commit(path, value):
             original_atomic(path, value)

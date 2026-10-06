@@ -278,7 +278,10 @@ class Deployer:
         candidate = valid_record(journal['candidate'])
         old = journal.get('previous')
         state_path = APP / 'state' / 'deployed.json'
-        state = read_json(state_path) if state_path.exists() else None
+        if not old or not state_path.exists():
+            raise Failed('recovery_anchor_required')
+        valid_record(old)
+        state = valid_record(read_json(state_path))
         # Successful atomic commit wins, even if a crash preceded journal removal.
         if state and all(state.get(key) == candidate[key] for key in ('sha', 'digest', 'snapshot')):
             self.verify_signature(candidate['digest'])
@@ -287,28 +290,23 @@ class Deployer:
         # Never allow an old transaction to roll back a newer successful deployment.
         if state and (not old or any(state.get(key) != old.get(key) for key in ('sha', 'digest', 'snapshot'))):
             raise Failed('recovery_state_conflict')
-        if old:
-            self.activate(valid_record(old))
-            atomic(APP / 'state' / 'status.json', {'status': 'rolled_back', 'sha': old['sha'], 'digest': old['digest']})
-        else:
-            self.verify_signature(candidate['digest'])
-            # Activation may have been interrupted before image.env existed.
-            atomic(APP / 'image.env', 'BOT_IMAGE=' + candidate['digest'] + '\n')
-            atomic(APP / '.env.runtime', env_text(APP / 'state' / candidate['snapshot']))
-            # No previous healthy deployment: stop only this bot, retain explicit failure.
-            self.compose('stop', 'bot')
-            atomic(APP / 'state' / 'status.json', {'status': 'failed_initial_no_rollback'})
+        self.activate(old)
+        atomic(APP / 'state' / 'status.json', {'status': 'rolled_back', 'sha': old['sha'], 'digest': old['digest']})
         pending.unlink()
-        return 'rolled_back' if old else 'failed_initial_no_rollback'
+        return 'rolled_back'
 
     def run(self, sha=None, digest=None, force=False, rollback=False):
         if not rollback and (not isinstance(sha, str) or not SHA.fullmatch(sha) or not isinstance(digest, str) or not DIGEST.fullmatch(digest)):
             raise Failed('candidate_invalid')
-        self.recover()
+        # State is an owner-established signed healthy anchor, not an optional
+        # hint. Check before recovery too: --force or an orphan journal must not
+        # turn state deletion into an implicit bootstrap/initial-stop path.
         state_path = APP / 'state' / 'deployed.json'
-        state = read_json(state_path) if state_path.exists() else None
-        if state:
-            valid_record(state)
+        if not state_path.exists():
+            raise Failed('deployment_anchor_required')
+        valid_record(read_json(state_path))
+        self.recover()
+        state = valid_record(read_json(state_path))
         self.old = {key: state[key] for key in ('sha', 'digest', 'snapshot')} if state else None
         if rollback:
             if not state or not state.get('previous'):
@@ -437,7 +435,8 @@ def prepare():
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
         raise Failed('app_dir_permissions')
     state = APP / 'state'
-    state.mkdir(mode=0o700, exist_ok=True)
+    # No implicit bootstrap: state directory/healthy record must already be
+    # established by the separately approved owner anchor transition.
     info = state.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
         raise Failed('state_dir_permissions')
@@ -497,7 +496,7 @@ def main():
                             if recovered == 'committed':
                                 print('deploy committed_recovery')
                             else:
-                                print('deploy failed_rollback_confirmed' if deployer.old else 'deploy failed_initial_no_rollback')
+                                print('deploy failed_rollback_confirmed')
                         except (Failed, OSError, ValueError, KeyError, TypeError):
                             atomic(APP / 'state' / 'status.json', {'status': 'failed_rollback_unconfirmed'})
                             print('deploy failed_rollback_unconfirmed')

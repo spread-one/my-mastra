@@ -204,13 +204,16 @@ class SignatureTests(unittest.TestCase):
         self.assertIn('blocked_installer_recovery_required', output.getvalue())
         self.assertEqual(before, self.files())
 
-    def test_unsigned_initial_recovery_cannot_stop_or_change_runtime(self):
+    def test_orphan_pending_recovery_cannot_stop_or_change_runtime_regardless_of_signature(self):
         candidate = {'sha': SHA_B, 'digest': DIGEST_B, 'snapshot': 'env-new'}
         d.atomic(self.app / 'state/env-new', 'not-read-before-signature')
         d.atomic(self.app / 'state/pending.json', {'candidate': candidate, 'previous': None})
-        self.reject = {DIGEST_B}
         before = self.files()
-        with self.verification(), self.assertRaises(d.Failed):
-            self.fake.recover()
-        self.assertEqual(before, self.files())
-        self.assertFalse(self.fake.stopped)
+        for reject in [set(), {DIGEST_B}]:
+            self.reject = reject
+            with self.verification(), self.assertRaisesRegex(d.Failed, 'recovery_anchor_required'):
+                self.fake.recover()
+            self.assertEqual(before, self.files())
+            self.assertFalse(self.fake.stopped)
+            self.assertFalse(self.calls)
+            self.assertFalse(self.fake.commands)
