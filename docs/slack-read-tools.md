@@ -65,9 +65,11 @@ bindSlackReadContext(requestContext,
 `getSlackSearchActionToken` is private transport plumbing (not exported by the
 integration entry point). Do not expose it through model context, logging, telemetry,
 cache, snapshots or persisted records. Tokens are held only in a request-object WeakMap.
-Only a nonempty bounded whitespace/control-free string from an authenticated event is
-accepted. Missing/invalid/expired tokens are not an empty search result. Text echoes
-are redacted; credential-bearing cursor/binding/metadata is rejected before output or
+The preserved action-token predicate accepts only a primitive nonempty string of at
+most 16,384 UTF-16 code units with no U+0000–U+0020 character. It intentionally does
+not reject DEL (U+007F), NBSP (U+00A0), or every other Unicode whitespace/control
+character; this is token-shape compatibility, not proof of authenticity or validity.
+Missing/invalid/expired tokens are not an empty search result. Text echoes are redacted; credential-bearing cursor/binding/metadata is rejected before output or
 continuation storage. Do not log SDK request/response/error bodies in the caller either.
 
 ## Live authorization adapters for attachment integration
@@ -102,9 +104,12 @@ A returned `CurrentSlackAccess` is informational, **not a reusable capability**.
 `readAuthorizedSlackMessage` is **current-channel only**. It performs an inclusive
 exact-timestamp history lookup, or explicit-parent replies lookup (max 15 records),
 requires exactly one match and rejects pagination, warnings, mismatched channel/team,
-wrong parent, malformed timestamps and invalid file IDs. Reply lookup requires its
-parent timestamp. It returns verified file IDs only, not metadata, URLs, credentials,
-downloads or a durable access grant. File/image integration must reauthorize each
+wrong parent, malformed timestamps and invalid file IDs. Each file record must be a
+non-null plain object (ordinary or null prototype, no Proxy/array/class instance), with
+an own data-property `id` that is a primitive string matching `F[A-Z0-9]{1,63}`.
+No coercion or ID getter runs; the frozen deduplicated result contains primitive ID
+snapshots only. Reply lookup requires its parent timestamp. It returns verified file
+IDs only, not metadata, URLs, credentials, downloads or a durable access grant. File/image integration must reauthorize each
 operation and validate its own download transport and file metadata.
 
 ## Read semantics
@@ -129,10 +134,19 @@ Search accepts literal words (no user-supplied Slack operators). Max 20 primary
 matches/page, four pages, 40 delivered records/page including contextual records.
 Exact workspace/channel/timestamp/permalink consistency is validated; navigation
 query hints are validated then removed, never converted to thread authority.
+A permalink query parent must be at or before its linked message. Independently of
+permalink presence/query hints, every search primary and context `thread_ts` must be
+at or before that record's timestamp. These comparisons use normalized six-digit
+integer timestamps, not floating point.
 `searchMatch`, `contextForTs`, `contextPosition` distinguish matches and context.
 Snippets/context are **not** verified full threads. Compatible unequal primary/context
 representations preserve primary text and omit alternate context with `partial`;
-conflicting known metadata or same-role text changes fail closed. No source synthesis.
+for unequal-text primary/context observations, conflicting known metadata fails closed;
+same-role text changes also fail closed. The deliberate equal-text cross-role exception
+is preserved: equal primary/context text hashes skip cross-role metadata compatibility
+checks, even if known author/kind/thread metadata differ. This is legacy acceptance,
+not a metadata equivalence assertion or a full-thread grant; scope, address and
+parent-not-after-message validation still apply to every record. No source synthesis.
 Optional `channelName` comes from live channel metadata, is display-only untrusted
 data, and never affects permission, addressing, query or identity. Display `#name`
 when present, otherwise `<#channelID>`; keep returned permalink as provenance.
@@ -199,3 +213,14 @@ throwing getters/noncoercion, defensive copying, stale identity/token/signal rev
 and denial before network dispatch despite forged public context/source text.
 This is exact automated test coverage, not a claim of independent full-scope review;
 main retains review scope, supplemental review, design and merge decisions.
+
+### Supplemental review delta
+
+`review-regressions.test.ts` covers coercible/nonprimitive file IDs, invalid file
+record types, getter/coercion nonexecution, duplicate primitive snapshots, future
+permalink roots rejected before network dispatch, missing/queryless search provenance,
+primary/context future-root denial (including equal-text observations), valid equal/
+earlier roots, and integer comparisons beyond floating-point precision. The existing
+equal-text conflicting-metadata regression retains that compatibility behavior using
+a different but temporally possible earlier root. Supplemental reviewer feedback is
+addressed by these checks; main owns independent delta review and acceptance.

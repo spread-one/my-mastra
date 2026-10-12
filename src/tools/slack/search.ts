@@ -191,6 +191,7 @@ export class SlackSearcher {
       };
       for (const m of data.results.messages) {
         validateScope(m, m.channel_id);
+        if (m.thread_ts && BigInt(m.thread_ts.replace(".", "")) > BigInt(m.message_ts.replace(".", ""))) unavailable();
         if (channel && m.channel_id !== channel) unavailable();
         await verify(m.channel_id);
         let normalizedPermalink = m.permalink;
@@ -212,6 +213,7 @@ export class SlackSearcher {
           // Any explicit scope, including alternate field names, must agree; never silently discard leaks.
           validateScope(c, m.channel_id);
           const contextTime = BigInt(c.ts.replace(".", "")), matchTime = BigInt(m.message_ts.replace(".", ""));
+          if (c.thread_ts && BigInt(c.thread_ts.replace(".", "")) > contextTime) unavailable();
           if ((position === "before" && contextTime >= matchTime) || (position === "after" && contextTime <= matchTime)) unavailable();
           if (m.thread_ts && c.thread_ts && c.thread_ts !== m.thread_ts) unavailable();
           const contextBot = c.is_author_bot, contextBotId = c.bot_id, contextUser = c.user_id, alternateUser = c.user;

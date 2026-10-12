@@ -35,7 +35,7 @@ export class SlackReader {
           url.searchParams.getAll("thread_ts").length > 1 || url.searchParams.getAll("cid").length > 1) invalid();
       const ts = `${match[2]!.slice(0, -6)}.${match[2]!.slice(-6)}`;
       const parent = url.searchParams.get("thread_ts") ?? ts;
-      if (!slackTs.safeParse(ts).success || !slackTs.safeParse(parent).success ||
+      if (!slackTs.safeParse(ts).success || !slackTs.safeParse(parent).success || timestamp(parent) > timestamp(ts) ||
           (url.searchParams.has("cid") && url.searchParams.get("cid") !== match[1]) ||
           (input.channel && input.channel !== match[1]) || (input.ts && input.ts !== parent)) invalid();
       channel = match[1]!; threadTs = parent; host = url.hostname;

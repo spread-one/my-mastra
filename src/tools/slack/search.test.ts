@@ -781,7 +781,7 @@ describe("same-page primary preservation with omitted alternate context (synthet
     f.apiCall.mockResolvedValueOnce({ ok: true, results: { messages: [
       { ...message(2), content: short, thread_ts: ts(1) },
       { ...message(2), content: short, author_user_id: undefined },
-      { ...message(4), context_messages: { before: [{ ts: ts(2), text: short, thread_ts: ts(3), user_id: "U3" }] } },
+      { ...message(4), context_messages: { before: [{ ts: ts(2), text: short, thread_ts: ts(0), user_id: "U3" }] } },
       { ...message(5), context_messages: { before: [{ ts: ts(2), text: short }] } },
     ] } });
     expect(await f.reader.search({ query: "launch" }, f.context)).toMatchObject({ status: "ok", complete: true, truncated: false,

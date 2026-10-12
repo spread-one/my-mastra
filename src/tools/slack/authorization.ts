@@ -1,3 +1,4 @@
+import { types } from "node:util";
 import { scopedSlackClient } from "./transport.js";
 import type { SlackReadClient } from "./client.js";
 import { isSlackReadScopeTs, getSlackSearchActionToken, getSlackReadIdentity, type SlackReadIdentity } from "./context.js";
@@ -91,11 +92,22 @@ export async function readAuthorizedSlackMessage(
     const message = matches[0]!;
     if (message.files !== undefined && !Array.isArray(message.files)) unavailable();
     const files = message.files ?? [];
-    if (files.length > 100 || files.some(file => !/^F[A-Z0-9]{1,63}$/.test(file.id ?? ""))) unavailable();
+    if (files.length > 100) unavailable();
+    const fileIds: string[] = [];
+    for (const file of files) {
+      if (file === null || typeof file !== "object" || Array.isArray(file) || types.isProxy(file)) unavailable();
+      const prototype = Object.getPrototypeOf(file);
+      if (prototype !== Object.prototype && prototype !== null) unavailable();
+      // Inspect an own data property once. Never coerce, retain raw objects or invoke ID getters.
+      const descriptor = Object.getOwnPropertyDescriptor(file, "id");
+      const id: unknown = descriptor && "value" in descriptor ? descriptor.value : undefined;
+      if (typeof id !== "string" || !/^F[A-Z0-9]{1,63}$/.test(id)) unavailable();
+      fileIds.push(id);
+    }
     const actionToken = getSlackSearchActionToken(context);
-    if (actionToken && JSON.stringify([access.channelId, target.messageTs, message.thread_ts, files.map(file => file.id)]).includes(actionToken)) unavailable();
+    if (actionToken && JSON.stringify([access.channelId, target.messageTs, message.thread_ts, fileIds]).includes(actionToken)) unavailable();
     return Object.freeze({ channelId: access.channelId, messageTs: target.messageTs,
       ...(message.thread_ts ? { threadTs: message.thread_ts } : {}),
-      fileIds: Object.freeze([...new Set(files.map(file => file.id!))]) });
+      fileIds: Object.freeze([...new Set(fileIds)]) });
   } catch (error) { throw new SlackReadAccessError(errorResult(error)); }
 }
