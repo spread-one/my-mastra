@@ -73,14 +73,20 @@ npm run start:slack
 - 공개/필요한 비공개 채널 초대, 권한 재설치, **bot token만으로** root/current/여러 페이지 조회.
 - 여러 사람이 참여한 기존 스레드의 역할/current 중복 없음, 다른 bot을 본 bot으로 오인하지 않음.
 - 권한 회수/잘못된 token type/부분 응답/큰 스레드/rate limit에서 실제 답변 모델이 미실행되고 안전한 안내만 게시되는지.
-- DM과 같은 스레드의 최근 대화, SIGTERM 재시작 시 cache 소멸, Slack UI의 plain-text 안전 출력.
+- DM과 같은 스레드의 최근 대화, SIGTERM 재시작 시 cache 소멸, Slack UI의 Markdown 구조·mention 방지 출력.
 - 실제 DeepSeek 요약/답변 품질·비용·지연과 외부 검색 정책.
 
 **이번 PR에서는 실제 Slack/LLM 네트워크 E2E 및 앱 설정 변경을 실행하지 않았다.** synthetic Slack 페이지/이벤트 → handler/runtime → model mock → 게시, 실제 Mastra/DeepSeek SDK를 mocked fetch로 통과하는 경계 테스트만 검증한다. 도움말/빌드 통과는 실제 설치 검증과 다르다.
 
 ## 출력과 데이터 처리
 
-출력은 Markdown을 **문자 그대로 보존하는 `plain_text` section blocks**(블록당 최대 2,800 UTF-16 units, 최대 40개)다. fallback은 `&<>` escaping, `mrkdwn:false`, `parse:none`, `link_names:false`, 링크/미디어 unfurl off. 모델의 `<@user>`, `<#channel>`, `<!everyone>` 등이 실제 mention으로 실행되지 않는다. 전체 본문 최대 20,000 UTF-16 units / 40,000 UTF-8 byte, escaped fallback 39,000 units. Unicode codepoint를 중간에서 자르지 않는다. 초과/빈 응답은 **부분 잘림 대신 고정 한도 안내**로 대체한다. 토큰/설정된 API 키가 모델 결과에 반영되어도 게시 전 제거하지만 임의 비밀 전체를 탐지하는 DLP는 아니다.
+출력 경계에서 정제된 표준 Markdown을 Slack Block Kit으로 변환한다. h1–h6는 150 units 이하일 때 `plain_text` header, 긴 제목은 잘림 없이 강조 section으로 표시한다. 구분선은 divider, 문단·목록·인용·굵게/기울임/취소선은 `mrkdwn` section이다. 한글 등 CJK 문자가 굵게 여는/닫는 경계에 붙으면 표시용 공백을 보정한다. intraword underscore 식별자는 변환하지 않는다. 표는 **모든 열 이름과 값을 유지하는 행별 카드**로 바꾸며, 코드 안의 Markdown은 변환하지 않는다. 긴 단일 행/코드는 Unicode codepoint·escaped entity를 보존하며 분할하고 코드/강조 경계를 각 section에서 닫는다. Slack fence로 표현할 수 없는 literal backtick 코드는 읽을 수 있는 plain-text로 표시한다. 빈 fence는 언어 정보와 빈 코드 안내를 보존한다. 인접 문단과 표 카드는 빈 줄 경계를 유지하며 section 한도 내에서 묶고 제목/구분선은 독립 구조를 유지한다. footer/버튼은 추가하지 않는다.
+
+`plain_text` 제목과 literal backtick 코드 section에는 정제된 원문을 그대로 넣어 `&<>`와 기존 `&lt;` 같은 literal entity를 보존한다. `mrkdwn`과 fallback 경로에서는 모델의 `&<>` 및 기존 entity를 먼저 escape하며, 원래의 `<@user>`, `<#channel>`, `<!everyone>`, `<URL|label>` 같은 Slack control은 실행하지 않는다. 검증한 public DNS 호스트의 HTTP(S) Markdown 링크만 안전한 labeled link로 생성한다(인증 정보·IP·local/internal 호스트·control delimiter 등은 거부). 거부되거나 너무 긴 링크는 레이블과 URL을 읽을 수 있게 보존한다. 이는 DNS/네트워크 도달성 검증이나 DLP가 아니다. 접근성 fallback은 제목·표의 열/값·코드·URL을 포함한 escaped 읽기용 텍스트이며 `mrkdwn:false`, `parse:none`, `link_names:false`, 링크/미디어 unfurl off를 유지한다.
+
+원문과 변환된 블록 본문 모두 최대 20,000 UTF-16 units / 40,000 UTF-8 byte, section 최대 2,800 units, 최대 40 blocks, escaped fallback 최대 39,000 units / 40,000 byte를 적용한다. escape·URL 정규화·표 열 이름 반복·코드 분할 확장도 한도에 포함한다. 초과/빈 응답은 **부분 잘림 대신 고정 한도 안내**로 대체한다. 토큰/설정된 API 키는 변환 전 제거하지만 임의 비밀 전체를 탐지하는 DLP는 아니다. DM cache에는 성공적으로 전달된 정제 Markdown 원문만 보존하며 블록에서 대화를 재구성하지 않는다. 표시용 요약 안내는 canonical answer와 별도로 관리하고 cache에 넣지 않는다. 오래된 스레드 요약 안내는 최종 원문에 한 번 추가하고 전체를 검증·렌더링한다.
+
+한국어 회의 요약을 흉내 낸 synthetic 테스트로 구조·payload 안전성·Unicode/변환 한도·DM history를 검증했다. 실제 Slack 화면의 plain-text 디코딩/시각적 렌더링·알림·접근성 클라이언트 또는 실제 LLM E2E는 실행하지 않았다. 렌더링 참조는 `yourssu/shookie` PR #38·#47·#51·#52이며, 원본의 긴 행 한도 초과 및 조용한 블록 잘림 동작은 가져오지 않았다.
 
 Slack의 원문과 요약은 **외부 서비스 DeepSeek로 전송**된다. 사용자에게 회사/개인 비밀을 입력하지 않도록 알리고 조직의 동의·보존·국외전송 정책을 확인해야 한다. 원문 텍스트/작성자 ID/시각이 포함될 수 있다. 공개 웹 도구는 그대로 두 개이며 외부 검색은 Exa, URL fetch는 해당 공개 호스트에 전송된다. Slack 본문/개인정보/토큰/비밀을 검색어/URL로 보내지 않도록 지시하지만 모델 지시만으로 유출을 완전히 막는다고 보장하지 않는다. 민감한 채널에는 설치하지 말고 필요한 경우 별도 egress/DLP 정책을 갖춘다.
 

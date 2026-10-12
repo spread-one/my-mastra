@@ -70,13 +70,21 @@ describe('handler -> authoritative context -> model -> safe thread delivery', ()
     const items = [{ ...source[0], reply_count: 19 }, ...older, { ...source.at(-1), ts: '100.000020' }];
     for (const fail of [false, true]) {
       const f = fixture(); f.replies.mockResolvedValue({ ok: true, messages: items as never, has_more: false });
+      f.chat.mockResolvedValue('## 회의\n\n**결정**합니다');
       if (fail) f.summarize.mockRejectedValue(new Error('SECRET'));
       await f.receive('app_mention', event({ ts: '100.000020', thread_ts: '100.000001' }), body('summary'), context);
       if (fail) {
         expect(f.chat).not.toHaveBeenCalled(); expect(f.postMessage.mock.calls[0]![0].text).toBe(CONTEXT_ERROR_TEXT);
       } else {
         expect(f.summarize).toHaveBeenCalled(); expect(contextBytes(f.chat.mock.calls[0]![0])).toBeLessThanOrEqual(48_000);
-        expect(f.postMessage.mock.calls[0]![0].text).toContain('요약된 맥락');
+        const posted = f.postMessage.mock.calls[0]![0];
+        expect(posted.text.match(/요약된 맥락/gu)).toHaveLength(1);
+        expect(posted.blocks.filter(b => b.type === 'header')).toHaveLength(1);
+        expect(JSON.stringify(posted.blocks)).toContain('*결정* 합니다');
+        expect(JSON.stringify(posted.blocks)).not.toContain('**결정**');
+        f.chat.mockResolvedValueOnce('x'.repeat(19_990));
+        await f.receive('app_mention', event({ ts: '100.000020', thread_ts: '100.000001' }), body('summary-limit'), context);
+        expect(f.postMessage.mock.calls[1]![0].text).toBe(OUTPUT_LIMIT_TEXT);
       }
       f.shutdown();
     }
@@ -95,6 +103,31 @@ describe('handler -> authoritative context -> model -> safe thread delivery', ()
 });
 
 describe('duplicate/thread/DM/deadline integration', () => {
+  it('does not cache display-only summary notice even if a future DM history carries summary metadata', async () => {
+    const f = fixture();
+    const key = JSON.stringify(['T1', 'D1', '101.0']);
+    f.cache.set(key, [{ role: 'user', content: '{"source":"slack_thread_summary"}' }, { role: 'assistant', content: 'prior' }]);
+    f.chat.mockResolvedValueOnce('## 정제 답변\n\n**결정**합니다');
+    await f.receive('message', dm('next', '101.1', '101.0'), body('notice-cache'), context);
+    expect(f.postMessage.mock.calls[0]![0].text.match(/요약된 맥락/gu)).toHaveLength(1);
+    expect(f.cache.get(key).at(-1)).toEqual({ role: 'assistant', content: '## 정제 답변\n\n**결정**합니다' });
+    f.shutdown();
+  });
+  it('caches canonical redacted Markdown only after successful DM delivery, never presentation blocks', async () => {
+    const answer = '## 회의\n\n**결정**합니다 SECRET <@U2>\n\n| 항목 | 값 |\n|---|---|\n| 이름 | 테스트 |';
+    const f = fixture({ secrets: ['SECRET'] });
+    f.chat.mockResolvedValueOnce(answer);
+    await f.receive('message', dm('first', '101.0'), body('canonical1'), context);
+    await f.receive('message', dm('next', '101.1', '101.0'), body('canonical2'), context);
+    expect(f.chat.mock.calls[1]![0][1]).toEqual({ role: 'assistant', content: answer.replace('SECRET', '[비밀 삭제]') });
+    expect(JSON.stringify(f.postMessage.mock.calls[0]![0])).not.toContain('SECRET');
+    f.postMessage.mockRejectedValueOnce(new Error('delivery failed'));
+    f.chat.mockResolvedValueOnce('## 실패한 답변');
+    await f.receive('message', dm('failed', '101.2', '101.0'), body('canonical3'), context);
+    await f.receive('message', dm('fresh', '101.3', '101.0'), body('canonical4'), context);
+    expect(f.chat.mock.calls[3]![0]).toHaveLength(1);
+    f.shutdown();
+  });
   it('suppresses running/success/failed event duplicates and serializes same-thread context lookup inside runtime', async () => {
     const f = fixture(); let release!: () => void;
     f.chat.mockImplementationOnce(async () => new Promise(r => { release = () => r('answer'); }));
@@ -165,11 +198,12 @@ describe('duplicate/thread/DM/deadline integration', () => {
     f.chat.mockResolvedValueOnce('<@U2> <!everyone> <#C1> sk-private xoxb-private');
     await f.receive('app_mention', event(), body('safe'), context);
     const posted = f.postMessage.mock.calls[0]![0]; expect(posted.text).not.toContain('<@'); expect(posted.text).not.toContain('private');
-    expect(posted.blocks[0]!.text.type).toBe('plain_text');
+    expect(posted.blocks[0]).toMatchObject({ type: 'section', text: { type: 'mrkdwn' } });
+    expect(JSON.stringify(posted.blocks)).not.toMatch(/<[@#!]|private/u);
     f.chat.mockRejectedValueOnce(new Error('sk-private BODY <@U2>'));
     await f.receive('app_mention', event(), body('error'), context);
     expect(f.postMessage.mock.calls[1]![0].text).toBe(GENERAL_ERROR_TEXT);
-    f.chat.mockResolvedValueOnce('x'.repeat(20_001)); await f.receive('app_mention', event(), body('large'), context);
+    f.chat.mockResolvedValueOnce('&'.repeat(4_001)); await f.receive('app_mention', event(), body('large'), context);
     expect(f.postMessage.mock.calls[2]![0].text).toBe(OUTPUT_LIMIT_TEXT);
     await f.receive('app_mention', event({ text: '😀'.repeat(2_001) }), body('input'), context);
     expect(f.chat).toHaveBeenCalledTimes(3); expect(f.postMessage.mock.calls[3]![0].text).toContain('메시지가 너무 깁니다'); f.shutdown();

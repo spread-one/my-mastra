@@ -108,11 +108,14 @@ describe('same configured model and tool-free summary over mocked SDK transport'
 });
 
 describe('safe output and bounded API requests', () => {
-  it('preserves all codepoints across strict sections, no mrkdwn/mentions/unfurls; redacts configured and Slack tokens', () => {
+  it('preserves Unicode across strict rendered sections, escapes controls and disables unfurls', () => {
     const text = '**heading** ```code``` <@U1> <#C1> <!everyone> & https://example.com\n' + '한😀'.repeat(2_000);
     const result = formatSlack(text);
-    expect(result.blocks.map(b => b.text.text).join('')).toBe(text);
-    for (const block of result.blocks) { expect(block.text.text.length).toBeLessThanOrEqual(2_800); expect(block.text.text).not.toMatch(/[\uD800-\uDBFF]$/u); }
+    const rendered = result.blocks.flatMap(b => b.type === 'divider' ? [] : [b.text.text]).join('');
+    expect(rendered).toContain('*heading*');
+    expect(rendered.match(/한😀/gu)).toHaveLength(2_000);
+    expect(rendered).not.toMatch(/<[@#!]/u);
+    for (const block of result.blocks) { if (block.type === 'divider') continue; expect(block.text.text.length).toBeLessThanOrEqual(2_800); expect(block.text.text).not.toMatch(/[\uD800-\uDBFF]$/u); }
     expect(result.text).not.toContain('<@'); expect(result.text).not.toContain('<!'); expect(result.text).toContain('&lt;');
     expect(result).toMatchObject({ mrkdwn: false, parse: 'none', link_names: false, unfurl_links: false, unfurl_media: false });
     expect(redactSecrets('sk-private xapp-private xoxb-secret', ['sk-private'])).not.toContain('private');
