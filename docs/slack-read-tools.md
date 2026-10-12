@@ -2,8 +2,7 @@
 
 This PR ports Shookie `src/tools/slack/**` read-only from main
 `96df8d480c8e639f89d941e6abc79d69678b0ce4` (PR91, PR108 and PR116 included).
-The original checkout is not modified. This is a library foundation, **not production
-handler/agent registration, a manifest change, or actual Slack installation validation**.
+The original checkout is not modified. The library foundation is now wired into production Slack in `src/slack/tools.ts`, `model.ts`, `run.ts`, with the updated manifest. This is **not actual Slack installation validation**; see [runtime-integration.md](runtime-integration.md).
 It does not implement cancellation commands, OAuth, auto-join, fallback history scans,
 attachment downloads, or privileged alternate credentials.
 
@@ -51,11 +50,11 @@ request and must not rebind it while a request is in flight. Explicit message/th
 addresses still use six fractional digits; the handler-bound scope timestamp accepts
 1–6 digits for compatibility with authenticated events.
 
-Illustrative **future authenticated handler** wiring:
+Authenticated runtime wiring (implemented by the handler/model adapter):
 
 ```ts
 const readClient = createSlackReadClient(boltClient); // same bot credential only
-const tools = createSlackTools(readClient);          // register later in integration PR
+const tools = createSlackTools(readClient);          // registered in the Slack runtime
 bindSlackReadContext(requestContext,
   { userId, teamId, channel, requestId, threadTs },
   authenticatedEvent.action_token, trustedAbortSignal);
@@ -187,7 +186,7 @@ behavior. The library never mutates a shared Bolt client's settings.
 
 Install-specific AI/Real-time Search enablement, bot `search:read.public`, event
 `action_token` availability and relevant conversation read scopes must be checked
-later against the actual installation. This foundation does not promise RTS on every
+manually against the actual installation after scopes are reapproved. This foundation does not promise RTS on every
 Slack installation or infer authorization from a search snippet.
 
 ## Validation

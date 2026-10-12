@@ -24,7 +24,7 @@ COSIGN_VERSION = 'v2.6.5'
 COSIGN_SHA256 = 'c3b4f5410e608af03a5eb0aaac84a4313d8da131248e08ff1759ac70c79d1644'
 ISSUER = 'https://token.actions.githubusercontent.com'
 IDENTITY = SOURCE + '/.github/workflows/ci.yml@refs/heads/main'
-ENV_KEYS = {'DEEPSEEK_API_KEY', 'DEEPSEEK_MODEL', 'EXA_API_KEY', 'SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN'}
+ENV_KEYS = {'DEEPSEEK_API_KEY', 'DEEPSEEK_MODEL', 'EXA_API_KEY', 'SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN', 'VISION_API_KEY', 'VISION_BASE_URL', 'VISION_MODEL'}
 
 
 class Failed(Exception):
@@ -84,6 +84,26 @@ def env_text(path):
         raise Failed('optional_key_invalid')
     if values.get('DEEPSEEK_MODEL') and not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}', values['DEEPSEEK_MODEL']):
         raise Failed('model_invalid')
+    vision = [values.get(key, '') for key in ('VISION_API_KEY', 'VISION_BASE_URL', 'VISION_MODEL')]
+    if any(vision):
+        if not all(vision) or any(re.search(r'your-|placeholder|changeme|[<>]', value, re.I) for value in vision):
+            raise Failed('vision_config_invalid')
+        # Fixed HTTPS DNS endpoint shape only; runtime also validates public DNS/socket pinning.
+        if not re.fullmatch(r'https://[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?(?::443)?(?:/|/v1/?)?', vision[1]):
+            raise Failed('vision_config_invalid')
+        from urllib.parse import urlsplit
+        import ipaddress
+        host = urlsplit(vision[1]).hostname
+        if not host or '.' not in host or host.endswith(('.local', '.localhost', '.internal', '.lan', '.home', '.slack.com')):
+            raise Failed('vision_config_invalid')
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            pass
+        else:
+            raise Failed('vision_config_invalid')
+        if not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9._/-]{0,199}', vision[2]):
+            raise Failed('vision_config_invalid')
     return ''.join(f'{key}={value}\n' for key, value in sorted(values.items()))
 
 
@@ -470,7 +490,7 @@ def main():
                 return 1
             with tempfile.TemporaryDirectory(prefix='my-mastra-docker-') as config:
                 env = {key: value for key, value in os.environ.items()
-                       if not key.startswith(('COMPOSE_', 'DOCKER_', 'GIT_')) and key not in ENV_KEYS | {'BOT_IMAGE', 'SLACK_HEALTH_FILE'}}
+                       if not key.startswith(('COMPOSE_', 'DOCKER_', 'GIT_')) and key not in ENV_KEYS | {'BOT_IMAGE', 'SLACK_HEALTH_FILE', 'SLACK_HISTORY_DB'}}
                 env.update(HOME=config, DOCKER_CONFIG=config, DOCKER_HOST='unix:///var/run/docker.sock',
                            GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null', GIT_TERMINAL_PROMPT='0')
                 deployer = Deployer(env)

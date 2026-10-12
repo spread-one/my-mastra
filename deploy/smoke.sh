@@ -5,7 +5,9 @@ IMAGE="${1:-my-mastra:selfhost-smoke}"
 # Parse Compose with isolated synthetic files and --quiet; never render a host's real env/config.
 FIXTURE="$(mktemp -d)"
 CID=''
-cleanup() { if [[ -n "$CID" ]]; then docker rm -f "$CID" >/dev/null 2>&1 || true; fi; rm -rf -- "$FIXTURE"; }
+# This volume is a unique test fixture, never the production my-mastra-history volume.
+SMOKE_VOLUME="my-mastra-smoke-$(basename "$FIXTURE" | tr '[:upper:]' '[:lower:]')"
+cleanup() { if [[ -n "$CID" ]]; then docker rm -f "$CID" >/dev/null 2>&1 || true; fi; docker volume rm "$SMOKE_VOLUME" >/dev/null 2>&1 || true; rm -rf -- "$FIXTURE"; }
 trap cleanup EXIT
 cp "$(dirname -- "${BASH_SOURCE[0]}")/compose.yaml" "$FIXTURE/compose.yaml"
 printf 'DEEPSEEK_API_KEY=synthetic\nSLACK_BOT_TOKEN=xoxb-synthetic\nSLACK_APP_TOKEN=xapp-synthetic\n' > "$FIXTURE/.env.runtime"
@@ -13,13 +15,30 @@ printf 'BOT_IMAGE=%s\n' "$IMAGE" > "$FIXTURE/image.env"
 COMPOSE=(docker compose --project-name my-mastra-smoke --project-directory "$FIXTURE" --env-file "$FIXTURE/image.env" -f "$FIXTURE/compose.yaml")
 "${COMPOSE[@]}" config --quiet
 # Synthetic config only; assert actual Compose resource parsing, not deploy: reservations.
-"${COMPOSE[@]}" config --format json | python3 -c 'import json,sys; b=json.load(sys.stdin)["services"]["bot"]; assert float(b["cpus"]) == 1.0 and int(b["mem_limit"]) == 1073741824 and b["pids_limit"] == 128'
+"${COMPOSE[@]}" config --format json | python3 -c 'import json,sys; b=json.load(sys.stdin)["services"]["bot"]; assert float(b["cpus"]) == 1.0 and int(b["mem_limit"]) == 1073741824 and b["pids_limit"] == 128; assert b["environment"]["SLACK_HISTORY_DB"] == "/var/lib/my-mastra/history/history.sqlite"; assert b["volumes"][0]["type"] == "volume" and b["volumes"][0]["target"] == "/var/lib/my-mastra"'
 # Real hosted daemon HostConfig check using a keyless, network-disabled test command.
-printf 'services:\n  bot:\n    network_mode: none\n' > "$FIXTURE/smoke.yaml"
+printf 'services:\n  bot:\n    network_mode: none\nvolumes:\n  history:\n    name: %s\n' "$SMOKE_VOLUME" > "$FIXTURE/smoke.yaml"
 CID="$("${COMPOSE[@]}" -f "$FIXTURE/smoke.yaml" run -d --no-deps bot node -e 'setInterval(() => {}, 1000)')"
 [[ "$(docker inspect --format '{{.HostConfig.NanoCpus}}|{{.HostConfig.Memory}}|{{.HostConfig.PidsLimit}}' "$CID")" == '1000000000|1073741824|128' ]]
 docker rm -f "$CID" >/dev/null
 CID=''
+# Image-created private directories seed a NEW volume without root chmod/chown of existing data.
+"${COMPOSE[@]}" -f "$FIXTURE/smoke.yaml" run --rm --no-deps bot node --input-type=module -e '
+  import { statSync } from "node:fs";
+  import { openSqliteHistory } from "./dist/slack/history/index.js";
+  for (const path of ["/var/lib/my-mastra", "/var/lib/my-mastra/history"]) {
+    const stat = statSync(path); if (stat.uid !== 1000 || (stat.mode & 0o777) !== 0o700) process.exit(1);
+  }
+  const store = await openSqliteHistory(process.env.SLACK_HISTORY_DB);
+  await store.set(JSON.stringify(["TTEST", "DTEST", "100.0"]), [{role:"user",content:"fixture"},{role:"assistant",content:"canonical fixture"}], new AbortController().signal);
+  await store.close();
+'
+"${COMPOSE[@]}" -f "$FIXTURE/smoke.yaml" run --rm --no-deps bot node --input-type=module -e '
+  import { openSqliteHistory } from "./dist/slack/history/index.js";
+  const store = await openSqliteHistory(process.env.SLACK_HISTORY_DB);
+  const pairs = await store.get(JSON.stringify(["TTEST", "DTEST", "100.0"]), new AbortController().signal);
+  if (pairs[1]?.content !== "canonical fixture") process.exit(1); await store.close();
+'
 COMMON=(--cpus 1.0 --memory 1g --pids-limit 128 --rm --platform linux/amd64 --read-only --cap-drop ALL --security-opt no-new-privileges --network none
   --tmpfs /tmp:rw,noexec,nosuid,size=64m,uid=1000,gid=1000,mode=1700
   --tmpfs /run/my-mastra:rw,noexec,nosuid,size=1m,uid=1000,gid=1000,mode=0700)
