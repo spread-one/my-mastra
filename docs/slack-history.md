@@ -134,7 +134,7 @@ This survives tested close/reopen and uses SQLite crash-recovery primitives; act
 power-loss durability depends on filesystem/storage honoring fsync. It does **not**
 provide durable Slack exactly-once processing, request claims or atomic Slack-send+DB
 commit. A crash between Slack delivery and set can lose a turn; retries can duplicate
-responses. Handlers commit only after successful final delivery. Ordinary failed turns delete only their own DM key; abort/shutdown/history failures preserve previously committed pairs. History get or actor inconsistency failures refuse to generate a missing-context answer with a static history-unavailable notice. Set failure after delivery is not an atomic Slack/DB transaction and cannot undo that Slack message.
+responses. Handlers commit only after successful final delivery. Ordinary failed turns delete only their own DM key; abort/shutdown/history failures preserve previously committed pairs. History get or actor inconsistency failures refuse to generate a missing-context answer with a static history-unavailable notice. Set failure after a **confirmed accepted final delivery** is not an atomic Slack/DB transaction and cannot undo that Slack message. The handler preserves previous pairs and sends one best-effort static “답변은 전송했지만 대화 기록 저장에 실패했습니다…” ancillary notice, without retrying/reanswering or classifying it as a model failure (`history_save_failed` static log). This warning shares the separately bounded notice lifecycle (5s, concurrency 2, at most one per thread, no queue/recursive retry, stopped/aborted on shutdown). A deadline after confirmed delivery still cannot write late history. An ambiguous ordinary post or stream-stop response remains unconfirmed and suppresses additional answers/notices; confirmation is never inferred from an attempted write.
 
 Shookie `database/src/conversations.ts`, `007_conversation_runtime.sql`, and
 `shookie/src/slack/conversation-runtime.ts` were read-only design references for atomic
@@ -142,6 +142,8 @@ completed pairs and separation of authoritative channel context. Their PostgreSQ
 request-claim, cancellation and cache infrastructure was not copied or operated.
 
 Validation: `npm test`, `npm run typecheck`, `npm run build` (each bounded to 60 seconds).
+`revision-regressions.test.ts` additionally acquires a real second connection's `BEGIN IMMEDIATE` inside accepted ordinary-post and stream-stop callbacks: exactly one answer plus an accurate save-failure warning, previous disk pairs retained and reopened. It also updates a live stored payload to a corrupt row and verifies fail-closed **before chat**, without deleting that row. Confirmed-delivery deadline fencing and stalled warning5s/no-recursion are covered separately.
+
 Tests use real SQLite in isolated private temporary directories, owned-fixture-only
 cleanup, reopen restoration, TTL, quotas, tuple isolation, pair validation, abort/close
 fencing, locking failures, corruption, incompatible schema, permissions and page growth.

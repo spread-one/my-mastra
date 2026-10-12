@@ -1,3 +1,4 @@
+import { guardSlackToolOutput } from './tool-output.js';
 import type { ExtraTools } from '../agent/agents/main/index.js';
 import { types } from 'node:util';
 import type { DownloadDependencies } from '../tools/attachments/download.js';
@@ -76,15 +77,7 @@ export function createSlackRuntimeTools(config: SlackConfig, client: SlackReadCl
       const result = await execute(input, context);
       const secrets = [config.botToken, config.appToken, config.deepseekApiKey, config.exaApiKey, config.vision?.apiKey,
         getSlackSearchActionToken(context?.requestContext)].filter((s): s is string => !!s);
-      const encoded = JSON.stringify(result);
-      if (secrets.some(secret => encoded.includes(secret) || encoded.includes(JSON.stringify(secret).slice(1, -1))) ||
-          /https?:\/\/files\.slack\.com\/files-pri\//iu.test(encoded)) {
-        if (name === 'slack_read_attachment' || name === 'slack_analyze_image') return {
-          ok: false, error: { code: 'PRIVATE_OUTPUT_BLOCKED', message: '비공개 정보를 포함한 결과를 전달하지 않았습니다.' } };
-        return { status: 'unavailable', message: '비공개 정보를 포함한 결과를 전달하지 않았습니다.', messages: [],
-          page: 0, nextCursor: null, complete: false, truncated: false, limits: { pageSize: 15, maxPages: 4, maxPageBytes: 24_000 } };
-      }
-      return result;
+      return guardSlackToolOutput(name, result, secrets);
     };
   }
   return tools;

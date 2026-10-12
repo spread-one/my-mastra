@@ -7,14 +7,15 @@ import { createHash } from 'node:crypto';
 import type { Chat, ChatMessage } from '../chat.js';
 import { budgetSlackThread, contextBytes, eventMessage, readSlackThread, removeOwnMention, validTs, type RepliesClient, type Summarize } from './context.js';
 import { formatSlack, sanitizeSlackSource, sanitizeSlackDataMessage, OUTPUT_LIMIT_TEXT } from './format.js';
-import { bytes, SLACK_LIMITS as limits, SlackBusyError, SlackCancelledError, SlackContextError, SlackInputError, slackCall } from './limits.js';
+import { abortable, bytes, SLACK_LIMITS as limits, SlackBusyError, SlackCancelledError, SlackContextError, SlackInputError, slackCall } from './limits.js';
 import { DmCache, SlackRuntime } from './runtime.js';
 import { SlackPlan, type StreamApi } from './streaming.js';
 
 export const CONTEXT_ERROR_TEXT = '스레드 전체 맥락을 확인하지 못해 답변하지 않았습니다. 새 멘션으로 다시 시도하거나 관리자에게 채널 접근·history 권한을 확인해 달라고 요청해주세요.';
 export const HISTORY_ERROR_TEXT = '대화 저장소를 확인하지 못해 답변하지 않았습니다. 관리자에게 대화 저장소 복구를 요청해주세요.';
+export const HISTORY_SAVE_ERROR_TEXT = '답변은 전송했지만 대화 기록 저장에 실패했습니다. 관리자에게 대화 저장소 확인을 요청해주세요.';
 export const GENERAL_ERROR_TEXT = '요청을 안전하게 처리하지 못했습니다. 잠시 후 새 메시지로 다시 시도해주세요.';
-export type SafeLog = (code: 'run_failed' | 'delivery_failed' | 'transport_error' | 'started' | 'stopped' | 'startup_failed') => void;
+export type SafeLog = (code: 'run_failed' | 'history_save_failed' | 'delivery_failed' | 'transport_error' | 'started' | 'stopped' | 'startup_failed') => void;
 export type SlackPost = ReturnType<typeof formatSlack> & { channel: string; thread_ts: string };
 export interface SlackClient extends RepliesClient { chat: { postMessage: (args: SlackPost) => Promise<unknown> }; apiCall?: StreamApi }
 export type EventKind = 'app_mention' | 'message';
@@ -65,10 +66,10 @@ export function createSlackHandlers(deps: HandlerDeps) {
   // No notice queue; drop excess notices (or simultaneous same-thread notices) during overload.
   const notices = new Map<string, AbortController>();
   const log = deps.log ?? (() => {});
-  const post = async (event: TrustedEvent, text: string, signal: AbortSignal, formatted = formatSlack(text, deps.secrets)) => {
+  const post = async (event: TrustedEvent, text: string, signal: AbortSignal, formatted = formatSlack(text, deps.secrets), noRetry = false) => {
     signal.throwIfAborted();
-    const response = object(await slackCall(() => deps.client.chat.postMessage({ channel: event.channel, thread_ts: event.root,
-      ...formatted }), signal));
+    const call = () => deps.client.chat.postMessage({ channel: event.channel, thread_ts: event.root, ...formatted });
+    const response = object(await (noRetry ? abortable(call(), signal) : slackCall(call, signal)));
     if (response.ok !== true || response.error || response.warning || (object(response.response_metadata).warnings as unknown[] | undefined)?.length) throw new Error('SLACK_DELIVERY_FAILED');
   };
   async function receive(kind: EventKind, raw: unknown, body: unknown, context: unknown): Promise<void> {
@@ -79,10 +80,16 @@ export function createSlackHandlers(deps: HandlerDeps) {
     const invocationSecrets = [...(deps.secrets ?? []), ...(typeof event.actionToken === 'string' && event.actionToken
       ? [event.actionToken, JSON.stringify(event.actionToken).slice(1, -1)] : [])];
     let plan: SlackPlan | undefined;
+    let confirmedDelivered = false, ordinaryFinalAttempted = false, historySaved = !event.dm;
     try {
       await runtime.run(event.id, key, async signal => {
         const deliver = async (text: string, formatted = formatSlack(text, deps.secrets)) => {
-          if (!await plan!.deliver(formatted)) await post(event, text, signal, formatted);
+          if (!await plan!.deliver(formatted)) {
+            ordinaryFinalAttempted = true;
+            await post(event, text, signal, formatted);
+          }
+          // Only an accepted final response confirms delivery, never an attempted/ambiguous write.
+          confirmedDelivered = true;
         };
         try {
           if (event.oversized) throw new SlackInputError();
@@ -109,7 +116,9 @@ export function createSlackHandlers(deps: HandlerDeps) {
                 if (messages.some((m, i) => i % 2 === 0 && JSON.parse(m.content).author?.userId !== event.user)) throw new Error();
               } catch { throw new HistoryError('DATABASE'); }
             }
-            const current = eventMessage(sanitizeSlackSource(event.text, deps.secrets), event.user, event.current, event.files);
+            messages = messages.map(m => ({ ...m, content: sanitizeSlackDataMessage(m.content, invocationSecrets) }));
+            const current = eventMessage(event.text, event.user, event.current, event.files);
+            current.content = sanitizeSlackDataMessage(current.content, invocationSecrets);
             while (messages.length && contextBytes([...messages, current]) > limits.contextBytes) messages.splice(0, 2);
             messages.push(current);
             if (contextBytes(messages) > limits.contextBytes) throw new SlackInputError();
@@ -119,6 +128,11 @@ export function createSlackHandlers(deps: HandlerDeps) {
           plan = new SlackPlan(deps.client.apiCall?.bind(deps.client), { channel: event.channel, thread_ts: event.root,
             recipient_team_id: event.team, recipient_user_id: event.user }, signal);
           await plan.open();
+          // Summary or redaction may expand JSON; this is the final model-input fence.
+          if (contextBytes(messages) > limits.contextBytes) {
+            if (!event.dm && event.root !== event.current) throw new SlackContextError();
+            throw new SlackInputError();
+          }
           const answer = !event.text && !event.files.length && event.root === event.current ? '네, 무엇을 도와드릴까요?' : await deps.chat(messages, signal, plan.progress,
             { ...metadata, requestContext });
           signal.throwIfAborted();
@@ -136,10 +150,11 @@ export function createSlackHandlers(deps: HandlerDeps) {
           if (event.dm) {
             const pairs: ChatMessage[] = [...messages, { role: 'assistant', content: canonicalAnswer }];
             if (deps.history) await deps.history.set(key, pairs, signal); else cache.set(key, pairs);
+            historySaved = true;
           }
         } catch (error) {
           // Do not mutate a corrupt store or destroy prior pairs on abort/shutdown.
-          if (event.dm && !(error instanceof HistoryError) && !signal.aborted) {
+          if (event.dm && !confirmedDelivered && !(error instanceof HistoryError) && !signal.aborted) {
             if (deps.history) await deps.history.delete(key, signal); else cache.delete(key);
           }
           throw error;
@@ -147,16 +162,19 @@ export function createSlackHandlers(deps: HandlerDeps) {
       });
     } catch (error) {
       if (stopped) return;
-      log('run_failed'); // Never accept dynamic error names/messages/objects or Slack text.
-      const text = error instanceof HistoryError ? HISTORY_ERROR_TEXT : error instanceof SlackContextError ? CONTEXT_ERROR_TEXT : error instanceof SlackBusyError
+      // A delivered answer is not a model failure. Preserve earlier pairs on save/abort failure.
+      const saveFailed = confirmedDelivered && event.dm && !historySaved;
+      if (confirmedDelivered && !saveFailed) return;
+      log(saveFailed ? 'history_save_failed' : 'run_failed'); // Static codes only.
+      const text = saveFailed ? HISTORY_SAVE_ERROR_TEXT : error instanceof HistoryError ? HISTORY_ERROR_TEXT : error instanceof SlackContextError ? CONTEXT_ERROR_TEXT : error instanceof SlackBusyError
         ? '현재 요청이 많습니다. 잠시 후 새 메시지로 다시 시도해주세요.' : error instanceof SlackInputError
         ? '메시지가 너무 깁니다. 내용을 나누어 보내주세요.' : error instanceof SlackCancelledError
         ? '요청 시간 제한을 초과해 답변하지 않았습니다. 더 짧은 질문으로 다시 시도해주세요.' : GENERAL_ERROR_TEXT;
-      if (plan?.suppressNotice) return;
+      if (!saveFailed && (ordinaryFinalAttempted || plan?.suppressNotice)) return;
       // One separately bounded error notice outside the expired invocation; never an unbounded queue.
       if (notices.size >= limits.concurrency || notices.has(key)) return;
       const notice = new AbortController(); notices.set(key, notice);
-      try { await post(event, text, AbortSignal.any([notice.signal, AbortSignal.timeout(5_000)])); }
+      try { await post(event, text, AbortSignal.any([notice.signal, AbortSignal.timeout(5_000)]), formatSlack(text, deps.secrets), saveFailed); }
       catch { if (!stopped) log('delivery_failed'); }
       finally { notices.delete(key); }
     }
