@@ -2,7 +2,9 @@ import type { Config } from './config.js';
 import { createMastra } from './mastra/index.js';
 
 export type ChatMessage = { role: 'user'; content: string } | { role: 'assistant'; content: string };
-export type Chat = (messages: ChatMessage[], signal: AbortSignal) => Promise<string>;
+export type ChatProgress = { toolCallId: string; toolName: string; state: 'in_progress' | 'complete' | 'error' };
+export type ProgressObserver = (event: ChatProgress) => void | Promise<void>;
+export type Chat = (messages: ChatMessage[], signal: AbortSignal, progress?: ProgressObserver) => Promise<string>;
 export const CHAT_LIMITS = { promptChars: 8_000, replyChars: 20_000, historyChars: 48_000, turns: 12, deadlineMs: 90_000 } as const;
 
 export function createChat(config: Config): Chat {

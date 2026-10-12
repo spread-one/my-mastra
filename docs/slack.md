@@ -27,7 +27,7 @@ npm run start:slack
 ## 수신과 문맥의 경계
 
 - **사람의 채널 `app_mention`**, **사람의 DM(`message.im`)**만 수신한다. 자기 bot/다른 bot, 수정/삭제, 기타 모든 subtype 이벤트는 실행하지 않는다. 파일 공유 subtype도 제외한다.
-- bot 자신의 `<@ID>`만 제거하고 다른 사람 멘션은 데이터로 보존한다. 응답은 언제나 해당 이벤트의 `thread_ts`(없으면 `ts`)에 게시한다. 일반 완성 응답이며 UI streaming/Agents AI app, 진행 메시지, reaction relay, feedback/비용 footer는 없다.
+- bot 자신의 `<@ID>`만 제거하고 다른 사람 멘션은 데이터로 보존한다. 응답은 언제나 해당 이벤트의 `thread_ts`(없으면 `ts`)에 게시한다. 도구 진행은 선택적 plan/task_update 스트림으로 표시하고, 최종 답변은 한 번 완성해 게시한다. 텍스트 토큰 streaming, 취소 버튼/registry, reaction relay, feedback/비용 footer는 없다.
 - 채널 **최상위 멘션**은 이벤트 본문만 JSON 데이터로 전달한다. 다른 이력을 검색하거나 로컬 이력과 섞지 않는다.
 - **기존 스레드 멘션**은 Socket Mode 이벤트에서 얻은 channel/root/current만, 설정된 **bot client**로 `conversations.replies` 조회한다. 모델이 생성한 channel/thread 문자열로 조회하는 도구는 없고 사용자 OAuth fallback도 없다.
 - 모든 cursor 페이지를 읽고 root/current 존재, current 작성자 및 **event 본문과 current 본문 일치**, root의 `reply_count`, 중복 메시지 일관성, 반복 cursor, 빈/비정상 페이지, warning/error 및 `has_more`를 검사한다. root부터 현재 멘션까지 시간순으로 전달하고 현재 입력을 별도 덧붙이지 않는다. 이후 댓글도 전체성 검사에는 포함하지만 현재 요청의 모델 문맥에서는 제외한다. 조회 중 편집/댓글 수 race는 재조회/추정하지 않고 실패 폐쇄한다. 원문의 text 없는 파일/시스템/subtype 메시지 등 안전하게 표현할 수 없는 응답도 실패한다.
@@ -51,7 +51,8 @@ npm run start:slack
 | 중복 이벤트 | 실행 중 억제 + 성공/실패/과부하 후 10분 TTL·최근 최대 512건. team과 event ID 기준(없으면 채널/ts/user 해시) |
 | DM 캐시 | 30분 TTL, LRU 128스레드, 전체 JSON 1MB, 스레드당 48KB·12턴; 오래된 **완전한 쌍**만 제거 |
 | Slack API | SDK 요청 timeout 10초, SDK retry 0, 명시적 rate limit 거절만 2초 이하 Retry-After일 때 한 번 재시도. 긴 rate limit·일반/불확실한 전송 실패는 재시도하지 않음 |
-| 오류 안내 | 만료된 요청 밖에서 한국어 고정 안내 1회만, 최대 5초; 별도 최대 2개 동시·스레드당 1개, 큐 없음·초과 안내 생략, 실패도 재귀 재시도 없음 |
+| 진행 UI | 요청당 최대 24 tasks / 48 updates, 정적 알려진 도구 레이블과 상태만, API 실패 재시도 없음 |
+| 오류 안내 | 최종 답변 쓰기를 시도하기 전의 실패에 대해, 만료된 요청 밖에서 한국어 고정 안내 1회만, 최대 5초; 별도 최대 2개 동시·스레드당 1개, 큐 없음·초과 안내 생략, 실패도 재귀 재시도 없음 |
 | 시작/종료 | 시작 최대 30초, SIGINT/SIGTERM은 admission 중단+큐/active abort+캐시 비움, SDK stop 최대 5초 뒤 executable 종료 |
 
 48KB를 넘으면 **root 원문 + 명시된 오래된 댓글 요약(user 데이터) + 연속된 최근 댓글 원문/현재 멘션**을 전달한다. 요약 입력에 root를 seed로 넣고 오래된 모든 댓글을 원래 순서대로 한 번씩 반영한다. 실제 JSON escaping을 기준으로 검사하고 root/current를 자르거나 오래된 댓글을 조용히 버리지 않는다. root/current 보존 불가능, 한 댓글/누적 요약 입력이 너무 큼, 요약 실패/빈 출력/크기 초과/잘린 finish reason, Slack 부분조회/권한 오류 시 **답변 모델을 실행하지 않고** 한국어 실패 안내만 보낸다. 요약을 사용한 답변에는 고정 안내도 붙인다. 요약 품질·정확성과 프롬프트 인젝션 완전 방어를 보장하지는 않는다.
@@ -59,6 +60,16 @@ npm run start:slack
 요청 만료 시 모델/요약/조회에 abort를 전달하고 늦은 결과의 게시·DM cache commit을 차단한다. 실행 중 의존성이 abort를 무시하면 그 작업이 끝날 때까지 admission/concurrency/thread 슬롯을 유지해 무한 zombie 실행을 방지한다(따라서 새 요청이 과부하로 거절될 수 있음). Slack API race-abort 이후 SDK의 남은 HTTP 작업은 자체 timeout으로 제한된다. 오류 안내도 별도 bounded 슬롯을 사용해 과부하 이벤트가 무제한 Slack API 호출로 바뀌지 않으며 shutdown 시 abort한다. 종료 entry는 남은 socket/SDK 작업 때문에 프로세스가 무한 대기하지 않도록 최종 exit한다.
 
 **단일 프로세스, 무영속 best-effort 중복 억제**다. TTL/건수 밖 재전달·재시작·동시 여러 프로세스에서는 중복 생성/게시가 가능하다. 게시 후 응답 유실 등 분산 exactly-once를 보장하지 않는다. durable queue/저장소/수평 확장/토큰 회전 자동화는 없다. 요청 기한은 엄밀한 공급자 과금 상한이 아니므로 별도 계정 예산과 저권한 키를 사용한다.
+
+## 선택적 도구 진행 스트림
+
+Slack 답변만 Mastra `agent.stream`의 `fullStream`을 소비한다. tool-call/result/error는 안정적인 `toolCallId`로 연결하되 Slack에는 요청 내 `task-1` 같은 불투명 ID만 전달한다. 알려진 웹/Slack 읽기/파일/이미지 도구의 **정적 레이블 + in_progress/complete/error**만 보낸다. 미래 도구 이름의 레이블을 준비했지만 도구 등록/권한은 추가하지 않는다. 인수·결과·URL·검색어·Slack 본문·동적 도구명은 진행 카드나 로그에 넣지 않는다. 최종 text와 finishReason을 기다리고 error/불완전 종료는 답변으로 인정하지 않는다. 요약/CLI 생성 방식과 한도는 그대로다.
+
+`chat.startStream`은 plan 모드, 원래 channel/thread, 검증된 이벤트의 team/requester를 recipient로 사용한다. 선택적 `apiCall`이 없는 주입 client 또는 명시적 platform start 거절(`ok:false`/SDK `data.error`, 동기 throw 포함)은 부수적 UI 실패로 처리하고 모델을 한 번 실행해 기존 `postMessage`로 최종 답변 한 번만 보낸다. append 실패도 유효한 최종 답변을 막지 않는다. start의 불확실한 쓰기 실패는 모델을 실행하지 않고 고정된 bounded 오류 안내 한 번으로 알린다. 성공한 open 뒤 모델/불완전 종료/deadline 실패도 plan cleanup과 별도로 정상 bounded 오류 안내를 보낸다. 빈 진행 plan은 최종 답변이 아니므로 안내를 억제하지 않는다. 최종 stop 쓰기를 시도한 뒤에는 실패/abort 시 재시도하거나 일반 메시지·추가 오류 안내로 중복 게시하지 않는다. UI 복구를 위해 모델을 다시 실행하지 않는다. 최종 정제·렌더링 블록은 `stopStream`에 한 번만 전달하며 성공한 전달만 DM canonical Markdown cache에 반영한다.
+
+열린 스트림은 오류/90초 deadline/shutdown에서도 최종 본문 없이 최대 5초의 별도 cleanup으로 한 번만 닫는다. 생성 응답이 늦게 성공해도 ts를 추적해 같은 bounded cleanup을 적용하며 늦은 답변/cache commit은 금지한다. 불확실한 stop 쓰기를 반복하지 않으므로 네트워크/Slack 실패 시 UI 종료를 보장하지는 않는다. SDK timeout/retry 0은 그대로이며 cleanup은 요청 기한과 별도로 수행한다. 비협조적 모델의 admission/thread 슬롯 정책도 변경하지 않는다.
+
+Shookie PR [#39](https://github.com/yourssu/shookie/pull/39)와 streaming/handlers를 읽기 전용 참조했다. 원본의 인수/결과 표시, 임의 오류 로그, 모호한 쓰기 후 fallback, 피드백 버튼은 가져오지 않았다. synthetic API/handler 테스트와 실제 Mastra/DeepSeek SDK를 통과하는 mocked SSE(tool-call/result, 최종 text/finishReason)만 검증했다. **실제 Slack plan/task_update 스키마·화면 및 실제 공급자 E2E는 미검증**이다. 운영 설정·실제 Slack 호출은 하지 않았다.
 
 ## Slack API 제약과 설치 환경 확인
 
