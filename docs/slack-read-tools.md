@@ -32,14 +32,24 @@ type SlackReadIdentity = Readonly<{
 ```
 
 Only the authenticated Bolt handler may bind identity, using the live event's actor,
-workspace, current channel, request ID and parent/event timestamp. `threadTs` is a
-canonical Slack timestamp (six fractional digits); it binds continuation scope and
+workspace, current channel, request ID and parent/event timestamp. The binder validates actor (`U`/`W`), team (`T`) and channel (`C`/`G`/`D`) IDs
+with 1–63 uppercase alphanumeric suffix characters. `requestId` must be a nonempty
+opaque string of at most 256 UTF-16 code units without whitespace/control characters.
+`threadTs` follows the existing handler `validTs` contract (1–16 integer digits and
+1–6 fractional digits), is preserved without normalization, and binds continuation scope and
 provides the common trusted scope for subsequent snapshot/file integration. It does
 not restrict explicit thread reads to that root or grant access to other channels.
 No source message, channel hint, model input, or public `RequestContext.set()` entry
 can establish identity or an action token. These APIs are trusted host APIs, not tools.
-Rebinding clears the prior action token and signal; callers must use one context per
-request and must not rebind it while a request is in flight.
+Every bind attempt first revokes the previous identity, action token and signal.
+Invalid identity/object/field or non-native optional AbortSignal throws a value-free
+`TypeError("Invalid trusted Slack read context.")`; a failed rebind cannot leave a
+stale grant. Invalid/missing action tokens continue to mean unsupported search rather
+than invalid identity. Successful binding stores a frozen defensive primitive copy.
+Callers must use one context per
+request and must not rebind it while a request is in flight. Explicit message/thread tool
+addresses still use six fractional digits; the handler-bound scope timestamp accepts
+1–6 digits for compatibility with authenticated events.
 
 Illustrative **future authenticated handler** wiring:
 
@@ -174,3 +184,18 @@ missing/expired token, unsupported search, warnings/partial failure, secret-free
 output/state, trusted signals/timeouts, and the actual Slack SDK with injected HTTP.
 Run `npm test`, `npm run typecheck`, `npm run build` (each bounded to 60 seconds).
 These tests make no live Slack requests and are not an installation/E2E claim.
+
+### Revision validation coverage (binding hardening)
+
+Full suite execution includes `authorization.test.ts` (exact-message file provenance,
+current-channel live checks), `client.test.ts` (history/thread validation and cursor
+bounds), `cross-channel.test.ts` (target isolation), `search.test.ts` (native search,
+role metadata/fingerprints, permalink consistency, unsupported/error/partial responses
+and pagination), `search-channel-names.test.ts` (display-only names), diagnostic/token
+privacy regressions, and `foundation.test.ts` (real SDK-shaped injected HTTP, abort,
+429/no retry, trusted scopes and warnings). New `context.test.ts` covers bad-bind field
+and object types, bounded request IDs, 1–6 digit timestamp compatibility, fake signals,
+throwing getters/noncoercion, defensive copying, stale identity/token/signal revocation,
+and denial before network dispatch despite forged public context/source text.
+This is exact automated test coverage, not a claim of independent full-scope review;
+main retains review scope, supplemental review, design and merge decisions.

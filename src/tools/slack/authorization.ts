@@ -1,13 +1,13 @@
 import { scopedSlackClient } from "./transport.js";
 import type { SlackReadClient } from "./client.js";
-import { getSlackSearchActionToken, getSlackReadIdentity, type SlackReadIdentity } from "./context.js";
+import { isSlackReadScopeTs, getSlackSearchActionToken, getSlackReadIdentity, type SlackReadIdentity } from "./context.js";
 import { channelId, slackTs } from "./schemas.js";
 import { check, checkAuthorization, deny, errorResult, invalid, SlackReadAccessError, unavailable } from "./errors.js";
 
 export function requireSlackReadIdentity(context?: object): SlackReadIdentity {
   const identity = getSlackReadIdentity(context);
   if (!identity || !/^[UW][A-Z0-9]{1,63}$/.test(identity.userId) || !/^T[A-Z0-9]{1,63}$/.test(identity.teamId) ||
-      !channelId.safeParse(identity.channel).success || !identity.requestId || !slackTs.safeParse(identity.threadTs).success) deny();
+      !channelId.safeParse(identity.channel).success || !identity.requestId || !isSlackReadScopeTs(identity.threadTs)) deny();
   return identity;
 }
 export type CurrentSlackAccess = Readonly<{
