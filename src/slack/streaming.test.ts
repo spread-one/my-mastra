@@ -29,6 +29,16 @@ it('uses trusted recipients, opaque stable task IDs, static labels, and final bl
   expect(api.mock.calls.at(-1)).toEqual(['chat.stopStream', { channel: 'C1', ts: '200.1', ...final }]);
   expect(api).toHaveBeenCalledTimes(4);
 });
+it('allows only correct future foundation tool names with static labels', async () => {
+  const { plan, api } = fixture(); await plan.open();
+  for (const toolName of ['web_find', 'slack_read_history', 'web_find_in_content', 'slack_read_channel']) {
+    await plan.progress({ toolCallId: toolName, toolName, state: 'in_progress' });
+  }
+  expect(api.mock.calls.slice(1).map(call => call[1].chunks)).toEqual([
+    [{ type: 'task_update', id: 'task-1', title: '웹 내용 찾기', status: 'in_progress' }],
+    [{ type: 'task_update', id: 'task-2', title: 'Slack 채널 읽기', status: 'in_progress' }],
+  ]); await plan.cleanup();
+});
 it('bounds tasks and updates and ignores unstable/unknown result IDs', async () => {
   const { plan, api } = fixture(); await plan.open();
   for (let i = 0; i < 100; i++) {
@@ -46,7 +56,7 @@ it('uses ordinary delivery only when absent or explicitly unsupported, not ambig
     await plan.open(); expect(plan.suppressNotice).toBe(false); expect(await plan.deliver(formatSlack('answer'))).toBe(false); plan.dispose();
   }
   const { api, plan } = fixture(); api.mockRejectedValueOnce(new Error('ambiguous SECRET'));
-  await expect(plan.open()).rejects.toThrow('SLACK_STREAM_OPEN_FAILED'); expect(plan.suppressNotice).toBe(true);
+  await expect(plan.open()).rejects.toThrow('SLACK_STREAM_OPEN_FAILED'); expect(plan.suppressNotice).toBe(false);
   expect(api).toHaveBeenCalledOnce(); plan.dispose();
 });
 it.each([false, true])('append failure is ancillary; no retry or model recovery (%s)', async rejected => {
@@ -67,7 +77,7 @@ it('append timeout is bounded and ancillary; final delivery is still single', as
   vi.spyOn(AbortSignal, 'timeout').mockImplementation(ms => { const c = new AbortController(); setTimeout(() => c.abort(), ms); return c.signal; });
   const { plan, api } = fixture(); await plan.open();
   api.mockImplementationOnce(() => new Promise(() => {}));
-  const update = plan.progress({ toolCallId: 'one', toolName: 'web_find', state: 'in_progress' });
+  const update = plan.progress({ toolCallId: 'one', toolName: 'web_find_in_content', state: 'in_progress' });
   await vi.advanceTimersByTimeAsync(10_000); await update;
   expect(await plan.deliver(formatSlack('answer'))).toBe(true); await plan.cleanup(); expect(api).toHaveBeenCalledTimes(3);
 });

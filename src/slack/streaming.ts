@@ -4,13 +4,20 @@ import { abortable, SLACK_LIMITS } from './limits.js';
 
 export type StreamApi = (method: string, args: Record<string, unknown>) => Promise<unknown>;
 const labels: Readonly<Record<string, string>> = Object.freeze({
-  web_search: '웹 검색', web_fetch: '웹 페이지 읽기', web_read_more: '웹 추가 읽기', web_find: '웹 내용 찾기',
-  slack_search: 'Slack 검색', slack_read_thread: 'Slack 스레드 읽기', slack_read_history: 'Slack 기록 읽기',
+  web_search: '웹 검색', web_fetch: '웹 페이지 읽기', web_read_more: '웹 추가 읽기', web_find_in_content: '웹 내용 찾기',
+  slack_search: 'Slack 검색', slack_read_thread: 'Slack 스레드 읽기', slack_read_channel: 'Slack 채널 읽기',
   slack_read_attachment: '첨부 파일 읽기', slack_read_file: '파일 읽기', slack_analyze_image: '이미지 분석',
 });
 const record = (value: unknown): Record<string, unknown> => value && typeof value === 'object' ? value as Record<string, unknown> : {};
 const accepted = (value: unknown) => { const r = record(value); return r.ok === true && !r.error && !r.warning && !(record(r.response_metadata).warnings as unknown[] | undefined)?.length; };
-const unsupported = new Set(['unknown_method', 'method_not_supported', 'not_allowed_token_type', 'missing_scope', 'feature_not_enabled']);
+const rejected = (value: unknown) => {
+  const r = record(value);
+  return r.ok === false && typeof r.error === 'string' && !!r.error;
+};
+const platformRejection = (error: unknown) => {
+  const data = record(record(error).data);
+  return typeof data.error === 'string' && !!data.error;
+};
 
 /** Request-local, bounded, best-effort plan. Never transmit model-supplied IDs or data. */
 export class SlackPlan {
@@ -20,7 +27,7 @@ export class SlackPlan {
   private abandoned = false;
   private tasks = new Map<string, { id: string; title: string; finished: boolean }>();
   private events = 0;
-  // True until an explicit rejection proves no stream was created. Suppresses duplicate writes.
+  // Only an attempted final-answer write suppresses notices; an empty plan is not an answer.
   suppressNotice = false;
   constructor(private api: StreamApi | undefined, private target: { channel: string; thread_ts: string; recipient_team_id: string; recipient_user_id: string }, private signal: AbortSignal) {
     signal.addEventListener('abort', this.onAbort, { once: true });
@@ -31,8 +38,9 @@ export class SlackPlan {
   }
   async open(): Promise<void> {
     if (!this.api || this.signal.aborted) { this.disabled = true; return; }
-    this.suppressNotice = true;
-    const opening = this.api('chat.startStream', { ...this.target, task_display_mode: 'plan' });
+    let ambiguous = false;
+    // Deferral also classifies synchronous injected transport throws consistently.
+    const opening = Promise.resolve().then(() => this.api!('chat.startStream', { ...this.target, task_display_mode: 'plan' }));
     // Retain a late successful timestamp even when the deadline/shutdown has already won.
     const tracked = opening.then(value => {
       const r = record(value);
@@ -46,16 +54,15 @@ export class SlackPlan {
       const response = await abortable(tracked, AbortSignal.any([this.signal, AbortSignal.timeout(SLACK_LIMITS.apiTimeoutMs)]));
       if (!accepted(response) || !this.ts) {
         this.disabled = true;
-        if (unsupported.has(String(record(response).error))) this.suppressNotice = false;
+        ambiguous = !rejected(response);
       }
     } catch (error) {
       this.disabled = true; this.abandoned = true;
-      const data = record(record(error).data);
-      if (unsupported.has(String(data.error))) this.suppressNotice = false;
+      ambiguous = !platformRejection(error);
       await this.cleanup();
     }
     this.signal.throwIfAborted();
-    if (this.disabled && this.suppressNotice) throw new Error('SLACK_STREAM_OPEN_FAILED');
+    if (this.disabled && ambiguous) throw new Error('SLACK_STREAM_OPEN_FAILED');
   }
   progress = async (event: ChatProgress): Promise<void> => {
     this.signal.throwIfAborted();
@@ -84,6 +91,7 @@ export class SlackPlan {
     if (this.closed || this.abandoned) throw new Error('SLACK_STREAM_CLOSED');
     // A stop write is never retried or followed by an ordinary answer, even on ambiguous failure.
     this.closed = true;
+    this.suppressNotice = true;
     this.signal.removeEventListener('abort', this.onAbort);
     const response = await this.call('chat.stopStream', { channel: this.target.channel, ts: this.ts,
       ...formatted }, this.signal);

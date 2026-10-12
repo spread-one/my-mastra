@@ -52,7 +52,7 @@ npm run start:slack
 | DM 캐시 | 30분 TTL, LRU 128스레드, 전체 JSON 1MB, 스레드당 48KB·12턴; 오래된 **완전한 쌍**만 제거 |
 | Slack API | SDK 요청 timeout 10초, SDK retry 0, 명시적 rate limit 거절만 2초 이하 Retry-After일 때 한 번 재시도. 긴 rate limit·일반/불확실한 전송 실패는 재시도하지 않음 |
 | 진행 UI | 요청당 최대 24 tasks / 48 updates, 정적 알려진 도구 레이블과 상태만, API 실패 재시도 없음 |
-| 오류 안내 | 스트림이 없고 생성이 불확실하지 않을 때, 만료된 요청 밖에서 한국어 고정 안내 1회만, 최대 5초; 별도 최대 2개 동시·스레드당 1개, 큐 없음·초과 안내 생략, 실패도 재귀 재시도 없음 |
+| 오류 안내 | 최종 답변 쓰기를 시도하기 전의 실패에 대해, 만료된 요청 밖에서 한국어 고정 안내 1회만, 최대 5초; 별도 최대 2개 동시·스레드당 1개, 큐 없음·초과 안내 생략, 실패도 재귀 재시도 없음 |
 | 시작/종료 | 시작 최대 30초, SIGINT/SIGTERM은 admission 중단+큐/active abort+캐시 비움, SDK stop 최대 5초 뒤 executable 종료 |
 
 48KB를 넘으면 **root 원문 + 명시된 오래된 댓글 요약(user 데이터) + 연속된 최근 댓글 원문/현재 멘션**을 전달한다. 요약 입력에 root를 seed로 넣고 오래된 모든 댓글을 원래 순서대로 한 번씩 반영한다. 실제 JSON escaping을 기준으로 검사하고 root/current를 자르거나 오래된 댓글을 조용히 버리지 않는다. root/current 보존 불가능, 한 댓글/누적 요약 입력이 너무 큼, 요약 실패/빈 출력/크기 초과/잘린 finish reason, Slack 부분조회/권한 오류 시 **답변 모델을 실행하지 않고** 한국어 실패 안내만 보낸다. 요약을 사용한 답변에는 고정 안내도 붙인다. 요약 품질·정확성과 프롬프트 인젝션 완전 방어를 보장하지는 않는다.
@@ -65,7 +65,7 @@ npm run start:slack
 
 Slack 답변만 Mastra `agent.stream`의 `fullStream`을 소비한다. tool-call/result/error는 안정적인 `toolCallId`로 연결하되 Slack에는 요청 내 `task-1` 같은 불투명 ID만 전달한다. 알려진 웹/Slack 읽기/파일/이미지 도구의 **정적 레이블 + in_progress/complete/error**만 보낸다. 미래 도구 이름의 레이블을 준비했지만 도구 등록/권한은 추가하지 않는다. 인수·결과·URL·검색어·Slack 본문·동적 도구명은 진행 카드나 로그에 넣지 않는다. 최종 text와 finishReason을 기다리고 error/불완전 종료는 답변으로 인정하지 않는다. 요약/CLI 생성 방식과 한도는 그대로다.
 
-`chat.startStream`은 plan 모드, 원래 channel/thread, 검증된 이벤트의 team/requester를 recipient로 사용한다. 선택적 `apiCall`이 없는 주입 client 또는 명시적 미지원/권한 거절은 기존 `postMessage`로 최종 답변 한 번만 보낸다. append 실패는 부수적 UI 실패이며 유효한 최종 답변을 막지 않는다. start의 불확실한 쓰기 실패는 별도 게시를 하지 않으며, stop의 불확실한 실패도 재시도하거나 일반 메시지로 중복 게시하지 않는다. UI 복구를 위해 모델을 다시 실행하지 않는다. 최종 정제·렌더링 블록은 `stopStream`에 한 번만 전달하며 성공한 전달만 DM canonical Markdown cache에 반영한다.
+`chat.startStream`은 plan 모드, 원래 channel/thread, 검증된 이벤트의 team/requester를 recipient로 사용한다. 선택적 `apiCall`이 없는 주입 client 또는 명시적 platform start 거절(`ok:false`/SDK `data.error`, 동기 throw 포함)은 부수적 UI 실패로 처리하고 모델을 한 번 실행해 기존 `postMessage`로 최종 답변 한 번만 보낸다. append 실패도 유효한 최종 답변을 막지 않는다. start의 불확실한 쓰기 실패는 모델을 실행하지 않고 고정된 bounded 오류 안내 한 번으로 알린다. 성공한 open 뒤 모델/불완전 종료/deadline 실패도 plan cleanup과 별도로 정상 bounded 오류 안내를 보낸다. 빈 진행 plan은 최종 답변이 아니므로 안내를 억제하지 않는다. 최종 stop 쓰기를 시도한 뒤에는 실패/abort 시 재시도하거나 일반 메시지·추가 오류 안내로 중복 게시하지 않는다. UI 복구를 위해 모델을 다시 실행하지 않는다. 최종 정제·렌더링 블록은 `stopStream`에 한 번만 전달하며 성공한 전달만 DM canonical Markdown cache에 반영한다.
 
 열린 스트림은 오류/90초 deadline/shutdown에서도 최종 본문 없이 최대 5초의 별도 cleanup으로 한 번만 닫는다. 생성 응답이 늦게 성공해도 ts를 추적해 같은 bounded cleanup을 적용하며 늦은 답변/cache commit은 금지한다. 불확실한 stop 쓰기를 반복하지 않으므로 네트워크/Slack 실패 시 UI 종료를 보장하지는 않는다. SDK timeout/retry 0은 그대로이며 cleanup은 요청 기한과 별도로 수행한다. 비협조적 모델의 admission/thread 슬롯 정책도 변경하지 않는다.
 
