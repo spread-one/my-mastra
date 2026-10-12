@@ -38,7 +38,7 @@ function keyOf(key: string): string {
   if (!Array.isArray(tuple) || tuple.length !== 3 ||
       typeof tuple[0] !== 'string' || !/^T[A-Z0-9]{1,63}$/.test(tuple[0]) ||
       typeof tuple[1] !== 'string' || !/^D[A-Z0-9]{1,63}$/.test(tuple[1]) ||
-      typeof tuple[2] !== 'string' || !/^\d{1,16}\.\d{6}$/.test(tuple[2])) throw new HistoryError('INPUT');
+      typeof tuple[2] !== 'string' || !/^\d{1,16}\.\d{1,6}$/.test(tuple[2])) throw new HistoryError('INPUT');
   return JSON.stringify(tuple);
 }
 function validMessages(value: unknown): asserts value is ChatMessage[] {

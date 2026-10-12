@@ -26,6 +26,25 @@ describe('SQLite DM history', () => {
     expect(await store.get(key(), signal())).toEqual([]);
     expect(await store.get(key('T2'), signal())).toEqual(pair(key('T2')));
   });
+  it('preserves handler timestamps with one through six fractional digits across reopen', async () => {
+    const { path } = fixture(); let store = await open(path);
+    const accepted = ['101.0', '101.1', '101.000000', '101.000001'];
+    for (const root of accepted) {
+      await store.set(key('T1', 'D1', root), pair(root), signal());
+      expect(await store.get(key('T1', 'D1', root), signal())).toEqual(pair(root));
+    }
+    await store.close(); store = await open(path);
+    for (const root of accepted) expect(await store.get(key('T1', 'D1', root), signal())).toEqual(pair(root));
+    // Timestamp strings remain distinct; no numeric normalization or float parsing.
+    for (const root of ['101', '101.', '101.0000000', '.1', '101.-1', '101.x']) {
+      await expect(store.set(key('T1', 'D1', root), pair(), signal())).rejects.toThrow('INPUT');
+      await expect(store.get(key('T1', 'D1', root), signal())).rejects.toThrow('INPUT');
+    }
+    for (const invalid of [JSON.stringify(['T1', 'C1', '101.0']), JSON.stringify(['X1', 'D1', '101.0']), JSON.stringify(['T1', 'D1']), JSON.stringify(['T1', 'D1', 101.1])]) {
+      await expect(store.set(invalid, pair(), signal())).rejects.toThrow('INPUT');
+      await expect(store.get(invalid, signal())).rejects.toThrow('INPUT');
+    }
+  });
   it('applies seven-day default TTL and rejects unsafe option overrides before creating files', async () => {
     const { path } = fixture(); let now = 0; const store = await open(path, { now: () => now });
     await store.set(key(), pair(), signal()); now = 7 * 86_400_000 - 1;

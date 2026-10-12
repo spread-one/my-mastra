@@ -30,7 +30,9 @@ not a conversation-event claim/dedupe implementation.
 
 Keys must come exclusively from the authenticated handler, never model/tool output:
 JSON tuple `[team, DM channel, thread root]`, with `T`/`D` uppercase alphanumeric Slack
-IDs and a Slack timestamp (`digits.six-digits`). Whitespace in tuple JSON is normalized.
+IDs and a Slack timestamp (`digits.one-to-six-digits`), matching the existing trusted
+handler contract. Timestamp strings are preserved exactly, not parsed as floating point
+or normalized: `101.0` and `101.000000` remain distinct roots. Whitespace in tuple JSON is normalized.
 Team, channel and root all isolate history; the trusted DM channel binds its actor.
 The store cannot verify an actor or Slack authorization: handler authentication remains
 mandatory. Channel (`C`/`G`) keys are rejected. Channel authoritative threads must
@@ -69,6 +71,10 @@ rollback postpones expiry until the clock catches up. Cleanup runs on open and e
 operation, not via a background timer. Expired records can remain on disk while stopped.
 Lower limits on reopen discard expired/over-limit threads rather than rewrite them.
 Delete removes a thread atomically, with quota/expiry cleanup in the same transaction.
+`get` also uses a pruning write transaction: even reads acquire an immediate SQLite
+lock, scan/validate bounded stored payloads and may delete expired entries. This adds
+transaction/commit cost and means reads can fail fast on lock contention; they are not
+read-only point lookups.
 
 SQLite uses FULL synchronous commits, DELETE journaling (no accumulating WAL), FULL
 auto-vacuum and secure-delete. Main DB page size is 4,096, maximum 1,024 pages (4 MiB),
