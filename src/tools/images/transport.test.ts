@@ -5,7 +5,7 @@ import { Readable } from 'node:stream';
 import type { lookup } from 'node:dns/promises';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { IMAGE_LIMITS as L } from './policy.js';
-import { IMAGE_SYSTEM, interpretImage, visionEndpoint, type VisionDependencies } from './transport.js';
+import { IMAGE_SYSTEM, IMAGE_REFLECTION_CHARS, interpretImage, visionEndpoint, type VisionDependencies } from './transport.js';
 import { jpegFixture, pngFixture, visionResponse } from './fixtures.test-helper.js';
 
 const config = { apiKey: 'test-llm-secret', baseURL: 'https://api.deepseek.com', model: 'deepseek-flash' };
@@ -110,6 +110,41 @@ describe('isolated tool-free image transport', () => {
       await expect(interpretImage({ ...input, bytes, mime }, config, { dependencies: deps }))
         .rejects.toMatchObject({ code: 'VISION_FAILED', message: 'VISION_FAILED' });
       expect(deps.request).toHaveBeenCalledTimes(1);
+    }
+  });
+  it.each(['\n', ' ', '\t', '\r\n \t'])('rejects substantial prefix/suffix/interior/nearly-complete reflection wrapped at 64 with %j on both text boundaries', async separator => {
+    for (const [bytes, mime] of [[pngFixture(), 'image/png'], [jpegFixture(), 'image/jpeg']] as const) {
+      const encoded = bytes.toString('base64');
+      for (const partial of [encoded.slice(0, -8), encoded.slice(8), encoded.slice(4, -4), encoded.slice(0, -4)]) {
+        expect(partial.length).toBeGreaterThanOrEqual(IMAGE_REFLECTION_CHARS);
+        const wrapped = partial.match(/.{1,64}/gu)!.join(separator);
+        const output = fakeTransport(visionResponse(`파생 결과:\n${wrapped}`));
+        await expect(interpretImage({ ...input, bytes, mime }, config, { dependencies: output }))
+          .rejects.toMatchObject({ code: 'VISION_FAILED' });
+        const incoming = fakeTransport();
+        await expect(interpretImage({ bytes, mime, question: `질문:\n${wrapped}` }, config, { dependencies: incoming }))
+          .rejects.toMatchObject({ code: 'INVALID_INPUT' });
+        expect(incoming.resolve).not.toHaveBeenCalled(); expect(incoming.request).not.toHaveBeenCalled();
+      }
+    }
+  });
+  it('defines the exact-payload substantial threshold without rejecting short shared strings', async () => {
+    const encoded = input.bytes.toString('base64');
+    const short = encoded.slice(5, 5 + IMAGE_REFLECTION_CHARS - 1).match(/.{1,16}/gu)!.join('\n');
+    expect(await interpretImage({ ...input, question: short }, config, { dependencies: fakeTransport(visionResponse(short)) }))
+      .toEqual({ text: short, truncated: false });
+    const substantial = encoded.slice(5, 5 + IMAGE_REFLECTION_CHARS).match(/.{1,16}/gu)!.join('\n');
+    await expect(interpretImage(input, config, { dependencies: fakeTransport(visionResponse(substantial)) }))
+      .rejects.toMatchObject({ code: 'VISION_FAILED' });
+  });
+  it('requires real array choices and record-shaped response, choice and message', async () => {
+    const choice = { message: { role: 'assistant', content: 'observed text' }, finish_reason: 'stop' };
+    for (const value of [{ choices: { 0: choice, length: 1 } }, null, [], 'not an object',
+      { choices: [null] }, { choices: [[]] }, { choices: ['choice'] },
+      { choices: [{ ...choice, message: null }] }, { choices: [{ ...choice, message: [] }] },
+      { choices: [{ ...choice, message: 'message' }] }]) {
+      await expect(interpretImage(input, config, { dependencies: fakeTransport(JSON.stringify(value)) }))
+        .rejects.toMatchObject({ code: 'VISION_FAILED' });
     }
   });
   it('does not reject normal prose or spaced numbers merely because whitespace removal forms a long run', async () => {

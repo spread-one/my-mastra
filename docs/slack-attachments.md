@@ -52,7 +52,7 @@ PDF preflight는 PDF 1.0–1.7/EOF, 암호화, stream dictionary/길이/필터, 
 - 토큰은 정확한 Slack origin의 Authorization 헤더로만 전달. 동일 origin/private path redirect 최대 2회, 매 hop DNS 재검증. 외부 redirect 금지. 압축 응답 거부, 4 MiB/10초 제한. MIME은 서버 metadata와 전송 MIME을 모두 검증하며 TXT/CSV의 `application/force-download`만 예외(UTF-8 charset 필수 정책 유지). 이미지/PDF에는 이 예외를 적용하지 않음.
 - 운영자는 별도의 **서버 공급** `VisionConfig {apiKey, baseURL, model}`를 주입해야 합니다. 미설정은 `VISION_CONFIG`. DeepSeek/실행 모델이 이미지 입력을 지원한다고 가정하지 않으며 자동 fallback/모델 전환도 없습니다. 테스트 속 endpoint/model 이름은 가짜 transport 데이터일 뿐 실제 지원 증거가 아닙니다.
 - Vision endpoint는 HTTPS public DNS/pinned socket, root 또는 `/v1` base URL만 허용. redirect/압축/오류 응답 거부, 요청 6 MiB/응답 64 KiB/30초 제한. parent abort가 실제 HTTP socket을 파괴합니다. native DNS lookup은 취소 API가 없으므로 늦게 끝날 수 있으나 deadline 이후 socket을 열지 않습니다.
-- Vision wire에는 질문과 **inline PNG/JPEG bytes**만 전달; Slack token/private download URL/파일명/Slack metadata는 전달하지 않습니다. 도구 없는 별도 system prompt로 관찰/추론/불확실성을 구분. 응답에서 tool calls/refusal/비정상 schema/반사된 key·토큰·private URL/base64 payload를 거부. 정제된 오류 코드만 반환하며 raw provider/Slack 오류를 노출하지 않습니다.
+- Vision wire에는 질문과 **inline PNG/JPEG bytes**만 전달; Slack token/private download URL/파일명/Slack metadata는 전달하지 않습니다. 도구 없는 별도 system prompt로 관찰/추론/불확실성을 구분. 응답의 choices는 실제 배열이어야 하고 response/choice/message는 객체여야 합니다. tool calls/refusal/비정상 schema/반사된 key·토큰·private URL/base64 payload를 거부. 질문·응답 모두에서 공백을 제거한 뒤 **이번 이미지의 정확한 base64와 연속 64자 이상 일치하는 부분**(prefix/suffix/interior 포함) 또는 전체 payload를 거부합니다. 64자 미만 공유 문자열은 부분 반사로 간주하지 않습니다. 정규화한 일반 글·숫자를 무조건 base64로 분류하지 않습니다. bounded text suffix automaton으로 text+image 길이에 선형인 탐지를 사용합니다. 정제된 오류 코드만 반환하며 raw provider/Slack 오류를 노출하지 않습니다.
 - 이미지 내용을 제3자 Vision provider로 보내므로 배포 전에 해당 채널/조직의 개인정보·데이터 전송 정책과 provider 보관 정책을 승인받아야 합니다.
 
 ## 검증 범위

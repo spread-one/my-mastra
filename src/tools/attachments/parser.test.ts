@@ -35,6 +35,12 @@ describe('isolated attachment parser (synthetic)', () => {
     await expect(parseAttachment(pdfFixture(['secret'], { encrypted: true }), 'pdf')).rejects.toMatchObject({ code: 'ENCRYPTED_PDF' });
     await expect(parseAttachment(Buffer.from('not a pdf'), 'pdf')).rejects.toMatchObject({ code: 'INVALID_PDF' });
   });
+  it.each(['/F', '/DP', '/DecodeParms'])('rejects forbidden PDF stream key %s before dependency import', async key => {
+    for (const value of ['null', '[]', '2 0 R', '<< /Predictor 12 /Columns 999999 >>']) {
+      const body = Buffer.from(`%PDF-1.7\n1 0 obj\n<< /Length 1 ${key} ${value} >>\nstream\nx\nendstream\nendobj\n%%EOF`);
+      await expect(parseAttachment(body, 'pdf')).rejects.toMatchObject({ code: 'UNSUPPORTED_TYPE' });
+    }
+  });
   it('bounds Flate decompression and rejects indirect/escaped filters', async () => {
     const compressed = deflateSync(Buffer.alloc(L.inflatedStreamBytes + 1, 32));
     const bomb = Buffer.concat([Buffer.from(`%PDF-1.7\n1 0 obj\n<< /Length ${compressed.length} /Filter /FlateDecode >>\nstream\n`), compressed, Buffer.from('\nendstream\nendobj\n%%EOF')]);
