@@ -45,6 +45,8 @@ class InstallerTests(unittest.TestCase):
             for path, data in before.items():
                 self.assertEqual(path.read_bytes(), data)
             self.assertIn('mem_limit: 1g', (app / 'compose.yaml').read_text())
+            self.assertIn('name: my-mastra-history', (app / 'compose.yaml').read_text())
+            self.assertIn('SLACK_HISTORY_DB: /var/lib/my-mastra/history/history.sqlite', (app / 'compose.yaml').read_text())
             self.assertEqual((app / 'install-backup/1').read_text(), 'old reviewed compose')
             self.assertFalse((app / 'install-pending.json').exists())
             # Staged templates-only is deliberately NOT a verifier installation claim.

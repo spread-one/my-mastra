@@ -17,7 +17,9 @@ ARG VCS_REF
 ARG SOURCE_URL=https://github.com/spread-one/my-mastra
 LABEL org.opencontainers.image.source=$SOURCE_URL \
       org.opencontainers.image.revision=$VCS_REF
-ENV NODE_ENV=production SLACK_HEALTH_FILE=/run/my-mastra/health.json
+ENV NODE_ENV=production SLACK_HEALTH_FILE=/run/my-mastra/health.json SLACK_HISTORY_DB=/var/lib/my-mastra/history/history.sqlite
+# Docker copies this private owner/mode into a NEW named volume; never chmod host data.
+RUN install -d -m 0700 -o 1000 -g 1000 /var/lib/my-mastra /var/lib/my-mastra/history
 WORKDIR /app
 COPY --from=production-deps --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist

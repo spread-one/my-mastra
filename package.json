@@ -25,6 +25,7 @@
     "dotenv": "^16.6.1",
     "ipaddr.js": "^2.2.0",
     "linkedom": "0.18.12",
+    "pdfjs-dist": "4.10.38",
     "zod": "^3.25.76"
   },
   "devDependencies": {

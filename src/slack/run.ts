@@ -1,14 +1,16 @@
+import { openSqliteHistory, HistoryError } from './history/index.js';
+import { createSlackReadClient } from '../tools/slack/index.js';
 import { App, LogLevel, SocketModeReceiver } from '@slack/bolt';
 import { reportHealth } from './health.js';
 import type { Writable } from 'node:stream';
 import { ConfigError } from '../config.js';
 import { loadSlackConfig, type SlackConfig } from './config.js';
-import { registerSlackHandlers, type SafeLog } from './handlers.js';
+import { registerSlackHandlers, HISTORY_ERROR_TEXT, type SafeLog } from './handlers.js';
 import { createSlackModels } from './model.js';
 import { abortable, SLACK_LIMITS } from './limits.js';
 
-export const SLACK_HELP = `my-mastra — Slack Socket Mode 봇\n\n사용법:\n  npm run start:slack\n  npm run dev:slack\n  npm run start:slack -- --help\n\n필수: DEEPSEEK_API_KEY, SLACK_BOT_TOKEN(xoxb-), SLACK_APP_TOKEN(xapp-).\n선택: DEEPSEEK_MODEL, EXA_API_KEY. CLI에는 Slack 키가 필요하지 않습니다.\n설치/권한/개인정보/운영 한계: docs/slack.md 및 docs/slack-manifest.json 참고.\n`;
-export interface SlackSession { start: () => Promise<unknown>; stop: () => Promise<unknown>; shutdown: () => void; ready?: () => boolean }
+export const SLACK_HELP = `my-mastra — Slack Socket Mode 봇\n\n사용법:\n  npm run start:slack\n  npm run dev:slack\n  npm run start:slack -- --help\n\n필수: DEEPSEEK_API_KEY, SLACK_BOT_TOKEN(xoxb-), SLACK_APP_TOKEN(xapp-).\n선택: DEEPSEEK_MODEL, EXA_API_KEY, SLACK_HISTORY_DB, VISION_API_KEY/VISION_BASE_URL/VISION_MODEL. CLI에는 Slack 키가 필요하지 않습니다.\n설치/권한/개인정보/운영 한계: docs/slack.md 및 docs/slack-manifest.json 참고.\n`;
+export interface SlackSession { start: () => Promise<unknown>; stop: () => Promise<unknown>; shutdown: () => void | Promise<void>; ready?: () => boolean }
 export function createSlackSession(config: SlackConfig, log: SafeLog): SlackSession {
   // Bolt/Web API logs may otherwise include request/response data or arbitrary Error objects.
   const logger = {
@@ -32,14 +34,27 @@ export function createSlackSession(config: SlackConfig, log: SafeLog): SlackSess
     logger, logLevel: LogLevel.ERROR,
     clientOptions,
   });
-  const handlers = registerSlackHandlers(app, { client: app.client, ...createSlackModels(config),
-    secrets: [config.botToken, config.appToken, config.deepseekApiKey, config.exaApiKey ?? ''], log });
+  let handlers: ReturnType<typeof registerSlackHandlers> | undefined;
+  let shuttingDown = false;
+  const shutdown = () => { shuttingDown = true; return handlers?.shutdown(); };
   app.error(async () => log('transport_error'));
   return {
-    start: async () => { const result = await app.start(); started = true; return result; },
+    start: async () => {
+      const history = await openSqliteHistory(config.historyPath ?? '.local/slack-history/history.sqlite');
+      try {
+        if (shuttingDown) throw new Error('SLACK_STOPPED');
+        const client = createSlackReadClient(app.client);
+        handlers = registerSlackHandlers(app, { client: app.client, readClient: client, history,
+          ...createSlackModels(config, { config, client }),
+          secrets: [config.botToken, config.appToken, config.deepseekApiKey, config.exaApiKey ?? '', config.vision?.apiKey ?? ''], log });
+        const result = await app.start();
+        if (shuttingDown) throw new Error('SLACK_STOPPED');
+        started = true; return result;
+      } catch (error) { await shutdown(); await history.close(); throw error; }
+    },
     ready: () => started && connected && receiver.client.websocket?.isActive() === true,
-    stop: () => { started = false; connected = false; return app.stop(); },
-    shutdown: handlers.shutdown,
+    stop: async () => { started = false; connected = false; await shutdown(); return app.stop(); },
+    shutdown,
   };
 }
 
@@ -61,7 +76,7 @@ export async function runSlack(options: {
     stopHealth = reportHealth((options.env ?? process.env).SLACK_HEALTH_FILE,
       () => startupComplete && !options.signal.aborted && session?.ready?.() === true,
       () => log('transport_error'));
-    abort = () => session?.shutdown();
+    abort = () => { void Promise.resolve(session?.shutdown()).catch(() => log('transport_error')); };
     options.signal.addEventListener('abort', abort, { once: true });
     if (options.signal.aborted) abort();
     await abortable(session.start(), AbortSignal.any([options.signal, AbortSignal.timeout(30_000)]));
@@ -75,12 +90,13 @@ export async function runSlack(options: {
     return 130;
   } catch (error) {
     if (error instanceof ConfigError) options.error.write(error.message + '\n');
+    else if (error instanceof HistoryError) options.error.write(HISTORY_ERROR_TEXT + '\n');
     else if (!options.signal.aborted) log('startup_failed');
     return options.signal.aborted ? 130 : 1;
   } finally {
     stopHealth();
     options.signal.removeEventListener('abort', abort);
-    session?.shutdown();
+    abort();
     if (session) {
       try { await abortable(session.stop(), AbortSignal.timeout(5_000)); } catch { log('transport_error'); }
       log('stopped');

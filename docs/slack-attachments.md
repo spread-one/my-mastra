@@ -1,6 +1,6 @@
-# Slack 첨부 문서·이미지 foundation
+# Slack 첨부 문서·이미지
 
-이 PR은 **등록되지 않은 주입형 도구 팩토리**만 제공합니다. 실제 Slack 권한 라이브러리, handler/agent 등록, manifest, 운영 설정은 후속 통합 PR의 책임입니다. 실제 Slack 파일·Vision 모델을 호출하지 않았으며 end-to-end 동작을 주장하지 않습니다. Shookie attachments/images 구현(PR92/94/95/97 관련)을 포팅했으며 cancellation 실행 컨텍스트는 가져오지 않았습니다.
+도구 foundation과 실제 Slack 실행 등록을 제공합니다. `src/slack/tools.ts`가 기존 live-authority API로 `AuthorizeAttachment`를 구성하고 handler→agent의 동일 RequestContext에 연결합니다. 실제 Slack 파일·Vision 모델을 호출하지 않았으며 live end-to-end 동작을 주장하지 않습니다. 오프라인 실제 SDK/디스크/PDF 통합 검증과 설치 계약은 [runtime-integration.md](runtime-integration.md) 참고. Shookie attachments/images 구현(PR92/94/95/97 관련)을 포팅했으며 cancellation 실행 컨텍스트는 가져오지 않았습니다.
 
 ## 제공 API
 
@@ -25,9 +25,9 @@
 }>
 ```
 
-이 함수는 단순한 `files.info` 조회가 **아닙니다**. 병렬 Slack worker의 기존 trusted request-context bridge와 서버 정책을 사용해야 합니다. 이 foundation은 별도 identity/권한 저장소 또는 Slack auth 구현을 만들지 않습니다. 모델이 만든 requester/channel 객체나 파일 ID만으로 권한을 부여하면 안 됩니다.
+이 함수는 단순한 `files.info` 조회가 **아닙니다**. 기존 trusted request-context bridge와 서버 정책을 사용합니다. 별도 identity/권한 저장소 또는 Slack auth 구현을 만들지 않습니다. 모델이 만든 requester/channel 객체나 파일 ID만으로 권한을 부여하면 안 됩니다.
 
-후속 `createSlackAttachmentOptions` adapter는 기존 live authority의 다음 인터페이스를 사용해야 합니다(이 PR은 해당 모듈을 import하지 않음):
+실제 `createSlackAttachmentAuthorization` adapter는 하나의 operation-local `scopedSlackClient`(15초/32호출/신뢰 signal)로 다음 인터페이스를 사용합니다. base silent no-retry `createSlackReadClient(app.client)`는 세션에서 재사용하지만 scoped wrapper/grant는 요청 밖으로 재사용하지 않습니다:
 
 1. `readAuthorizedSlackMessage(client, requestContext, {messageTs, threadTs?, channelId?}, signal?)`: 현재 요청자·workspace·현재 채널 접근을 실시간 검증하고 history/replies에서 **정확한 메시지**를 읽어 `{channelId, messageTs, threadTs?, fileIds}` 반환. 파일 ID 포함 여부와 스레드 루트 일치를 검사. 검색/다른 채널 fallback 금지.
 2. `authorizeCurrentSlackChannel(client, requestContext, {channelId?}, signal?)`: 같은 trusted bridge를 통해 live 멤버십/서버 정책을 재검증. 반환 scope에는 `channelId`, `kind`, `identity: {channel, userId, teamId, requestId}`가 필요. 파일 조회 전후 scope/identity가 동일해야 함. 실제 라이브러리의 signal 전달 방식에 맞춰 adapter를 연결할 것.
@@ -38,9 +38,9 @@
 
 ## PDF 의존성·격리 계약
 
-통합 PR에서 추가할 정확한 runtime dependency: **`pdfjs-dist: 4.10.38`** (Shookie 기준). 현재 package/config/lockfile을 변경하지 않았습니다.
+고정 runtime dependency: **`pdfjs-dist: 4.10.38`** (Shookie 기준), package/lock에 포함합니다. optional `@napi-rs/canvas`와 플랫폼 native binary 전이 의존성이 추가됩니다. 렌더/OCR에 사용하지 않지만 PDF.js child import에서 로드될 수 있으므로 child heap 제한이 native RSS sandbox를 뜻하지 않습니다.
 
-서버에서 설치된 `pdfjs-dist/legacy/build/pdf.mjs`를 resolve한 절대 `file:` URL을 `AttachmentToolOptions.parserOptions.pdfModuleURL`에 주입해야 합니다. 모델 입력이나 첨부 파일로부터 이 URL을 만들지 마세요. 예: 서버 ESM에서 `import.meta.resolve('pdfjs-dist/legacy/build/pdf.mjs')`. PDF.js는 메인 프로세스가 아니라 제한된 별도 Node child에서 동적 import됩니다. 미설정/누락 모듈은 명시적 `PDF_UNAVAILABLE`; 파서가 없는 PDF를 정상 추출한 것처럼 반환하지 않습니다. 실제 PDF.js 추출/호환성 검증은 통합 이후 필수입니다. 현재 테스트의 성공 PDF 추출 경로는 **주입된 synthetic module 계약 검증**입니다.
+서버는 설치된 `pdfjs-dist/legacy/build/pdf.mjs`를 `import.meta.resolve`한 절대 `file:` URL을 `AttachmentToolOptions.parserOptions.pdfModuleURL`에 주입합니다. 모델 입력이나 첨부 파일로부터 이 URL을 만들지 마세요. 예: 서버 ESM에서 `import.meta.resolve('pdfjs-dist/legacy/build/pdf.mjs')`. PDF.js는 메인 프로세스가 아니라 제한된 별도 Node child에서 동적 import됩니다. 미설정/누락 모듈은 명시적 `PDF_UNAVAILABLE`; 파서가 없는 PDF를 정상 추출한 것처럼 반환하지 않습니다. `pdf-installed.test.ts`는 합성 PDF **파일 bytes**를 실제 설치 PDF.js로 추출합니다(합성 parser module 아님). 기존 synthetic-module isolation tests도 유지합니다. encrypted/malformed/unsupported/no-text/missing dependency는 안전한 실패로 검사합니다.
 
 PDF preflight는 PDF 1.0–1.7/EOF, 암호화, stream dictionary/길이/필터, 압축 해제량을 검사합니다. Flate 외 필터, 간접 길이, escaped dictionary key, `/F`, `/DP`, `/DecodeParms`는 보수적으로 거부합니다. 모든 정상 PDF를 지원하지 않습니다. OCR·스캔/빈 문서·암호화·Office는 지원하지 않습니다. eval/XFA/font/worker fetch/auto fetch를 비활성화합니다.
 
@@ -50,11 +50,11 @@ PDF preflight는 PDF 1.0–1.7/EOF, 암호화, stream dictionary/길이/필터, 
 
 - 다운로드는 HTTPS `files.slack.com/files-pri/`만 허용. userinfo/fragment/다른 port/인코딩된 traversal·separator/control 거부. public unicast DNS만 허용하고 **모든 주소**를 검사한 뒤 socket lookup을 public IP로 pin. 기본 TLS hostname 검증은 유지.
 - 토큰은 정확한 Slack origin의 Authorization 헤더로만 전달. 동일 origin/private path redirect 최대 2회, 매 hop DNS 재검증. 외부 redirect 금지. 압축 응답 거부, 4 MiB/10초 제한. MIME은 서버 metadata와 전송 MIME을 모두 검증하며 TXT/CSV의 `application/force-download`만 예외(UTF-8 charset 필수 정책 유지). 이미지/PDF에는 이 예외를 적용하지 않음.
-- 운영자는 별도의 **서버 공급** `VisionConfig {apiKey, baseURL, model}`를 주입해야 합니다. 미설정은 `VISION_CONFIG`. DeepSeek/실행 모델이 이미지 입력을 지원한다고 가정하지 않으며 자동 fallback/모델 전환도 없습니다. 테스트 속 endpoint/model 이름은 가짜 transport 데이터일 뿐 실제 지원 증거가 아닙니다.
+- 운영자는 별도의 **서버 공급** `VISION_API_KEY`, `VISION_BASE_URL`, `VISION_MODEL`을 모두 명시합니다. Slack config가 `VisionConfig {apiKey, baseURL, model}`를 주입합니다. 전부 미설정은 unavailable, 일부/unsafe는 값 없는 ConfigError입니다. 미설정은 `VISION_CONFIG`. DeepSeek/실행 모델이 이미지 입력을 지원한다고 가정하지 않으며 자동 fallback/모델 전환도 없습니다. 테스트 속 endpoint/model 이름은 가짜 transport 데이터일 뿐 실제 지원 증거가 아닙니다.
 - Vision endpoint는 HTTPS public DNS/pinned socket, root 또는 `/v1` base URL만 허용. redirect/압축/오류 응답 거부, 요청 6 MiB/응답 64 KiB/30초 제한. parent abort가 실제 HTTP socket을 파괴합니다. native DNS lookup은 취소 API가 없으므로 늦게 끝날 수 있으나 deadline 이후 socket을 열지 않습니다.
 - Vision wire에는 질문과 **inline PNG/JPEG bytes**만 전달; Slack token/private download URL/파일명/Slack metadata는 전달하지 않습니다. 도구 없는 별도 system prompt로 관찰/추론/불확실성을 구분. 응답의 choices는 실제 배열이어야 하고 response/choice/message는 객체여야 합니다. tool calls/refusal/비정상 schema/반사된 key·토큰·private URL/base64 payload를 거부. 질문·응답 모두에서 공백을 제거한 뒤 **이번 이미지의 정확한 base64와 연속 64자 이상 일치하는 부분**(prefix/suffix/interior 포함) 또는 전체 payload를 거부합니다. 64자 미만 공유 문자열은 부분 반사로 간주하지 않습니다. 정규화한 일반 글·숫자를 무조건 base64로 분류하지 않습니다. bounded text suffix automaton으로 text+image 길이에 선형인 탐지를 사용합니다. 정제된 오류 코드만 반환하며 raw provider/Slack 오류를 노출하지 않습니다.
 - 이미지 내용을 제3자 Vision provider로 보내므로 배포 전에 해당 채널/조직의 개인정보·데이터 전송 정책과 provider 보관 정책을 승인받아야 합니다.
 
 ## 검증 범위
 
-주입된 authorized metadata, synthetic 문서/이미지, mock transport와 loopback socket만 사용. URL/DNS/redirect/MIME/signature/size, Unicode/범위, CSV 수식 비실행, PDF decompression preflight/격리/dependency contract, 이미지 구조·해석 notice, inline wire payload, 응답·중단·timeout 경계를 검사합니다. `.env`/실제 Slack/실제 provider에는 접근하지 않습니다. live 권한 adapter·등록·manifest/config·실제 PDF.js·운영 Vision 모델 검증은 **미완료 통합 작업**입니다.
+주입된 authorized metadata, synthetic 문서/이미지, mock transport와 loopback socket만 사용. URL/DNS/redirect/MIME/signature/size, Unicode/범위, CSV 수식 비실행, PDF decompression preflight/격리/dependency contract, 이미지 구조·해석 notice, inline wire payload, 응답·중단·timeout 경계를 검사합니다. `.env`/실제 Slack/실제 provider에는 접근하지 않습니다. live 권한 adapter·실제 runtime 등록·manifest/config·실제 설치 PDF.js·real SQLite 재개방의 **오프라인 통합 검증**을 추가했습니다. 실제 운영 Slack/RTS/파일·Vision 모델·시각적 렌더링은 미검증이며 수동 활성화 검증이 필요합니다.

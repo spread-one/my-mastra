@@ -10,7 +10,7 @@ export const originals = [
   { ts: '100.000003', thread_ts: mention.root, user: 'UBOT', bot_id: 'BBOT', text: 'own answer' },
   { ts: '100.000004', thread_ts: mention.root, user: 'UOTHER', bot_id: 'BOTHER', text: 'other bot' },
   { ts: '100.000005', thread_ts: mention.root, bot_id: 'BBOT', text: 'own without user' },
-  { ts: mention.current, thread_ts: mention.root, user: 'U3', text: '<@UBOT> <@U2> 현재 질문', files: ['never read'] },
+  { ts: mention.current, thread_ts: mention.root, user: 'U3', text: '<@UBOT> <@U2> 현재 질문', files: [{ id: 'FTEST' }] },
 ];
 export const page = (messages: unknown[] = originals) => ({ ok: true, messages, has_more: false });
 function fixture(...pages: unknown[]) {

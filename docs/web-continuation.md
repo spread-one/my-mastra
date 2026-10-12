@@ -16,9 +16,9 @@
 
 이어 읽기/검색은 다운로드하지 않는다. URL·title·contentType·fetchedAt은 최초 스냅샷 메타데이터를 유지한다. 검색 공급자 응답은 계속 `search_snippets`, 직접 가져온 본문과 그 literal 일치는 `fetched_text`다. 본문·제목·URL은 신뢰할 수 없는 데이터이지 지시/승인이 아니다.
 
-## 후속 통합 PR: trusted RequestContext
+## Runtime trusted RequestContext
 
-이 PR은 웹 모듈 기반 구현이다. **실제 운영 핸들러의 trusted RequestContext 설정, CLI 세션 바인딩, 등록/설정/모델 수정은 후속 통합 PR 책임**이다. 후속 통합에서 trusted scope와 도구 사용 프롬프트를 준비한 뒤 `enableContinuation: true`를 명시해야 한다. 현재 운영 등록은 기본 두 도구를 유지한다. opt-in 후에도 컨텍스트가 없으면 이어 읽기는 닫힌 상태다.
+Slack과 CLI createChat은 `enableContinuation:true`로 opt-in한다. Slack model adapter는 인증 이벤트의 trusted 필드만 새 RequestContext에 넣고 이 **동일한 객체**를 agent.stream에 전달한다. Slack actor/action_token/signal은 별도 private WeakMaps에만 저장한다. CLI는 createChat 세션마다 신뢰 코드가 생성한 process/session UUIDs를 `cli:` namespace로 바인딩하며 Slack-shaped identity나 read grant는 생성하지 않는다. 라이브러리 기본 두 도구는 유지하고 컨텍스트 없는 opt-in 이어 읽기는 닫힌 상태다.
 
 Mastra Core 1.74의 서명은 `execute(input, context)`이며 `context.requestContext`와 `context.abortSignal`을 사용한다. 실제 SDK `Agent.generate` 루프 테스트로 컨텍스트 전달을 검증했다. 신뢰된 서버 핸들러가 인증된 이벤트로부터 다음 네 문자열을 채워야 한다:
 
@@ -50,4 +50,4 @@ CLI 통합은 신뢰된 코드에서 프로세스/세션별 격리된 네 필드
 
 ## 검증
 
-`npm test`, `npx vitest run src/tools/web`, `npm run typecheck`, `npm run build` (각 최대 60초). 기본 두 도구 계약을 유지하므로 기존 agent/Slack 등록 테스트 수정이 필요 없다. continuation 테스트는 명시적 opt-in과 실제 SDK 컨텍스트 전달을 검증한다.
+`npm test`, `npx vitest run src/tools/web`, `npm run typecheck`, `npm run build` (각 최대 60초). 기본 라이브러리 두 도구 계약을 유지한다. continuation 테스트는 명시적 opt-in과 실제 SDK 컨텍스트 전달을 검증하며 `src/chat.test.ts`는 실제 createChat의 재호출 continuation 및 다른 CLI 세션 거부를 검사한다.

@@ -1,8 +1,8 @@
 # my-mastra
 
-공개 웹 도구와 제공된 대화 맥락을 참고하는 **독립 TypeScript ESM Mastra 에이전트**입니다. 로컬 터미널 또는 Slack 멘션/DM에서 DeepSeek와 대화하고, 필요할 때 `web_search` / `web_fetch` 두 도구만 사용합니다.
+공개 웹 도구와 제공된 대화 맥락을 참고하는 **독립 TypeScript ESM Mastra 에이전트**입니다. 로컬 터미널 또는 Slack 멘션/DM에서 DeepSeek와 대화하고, 필요할 때 공개 웹 검색·본문·이어 읽기 도구를 사용합니다. Slack 실행에는 실시간 권한 검증을 거치는 검색·채널/스레드·첨부 문서·이미지 도구도 등록됩니다.
 
-shookie의 에이전트 파일 분리 방식, 범용 웹 전송·Exa 프로토콜 및 안전한 Slack 스레드 맥락/동시 실행 경계를 바탕으로 필요한 부분만 독립시켰습니다. 조직 전용 프롬프트·설정·리소스, 사내 API, GitHub 저장소 복제, 데이터베이스 어댑터, OAuth 서버, 지속 메모리는 포함하지 않습니다. npm 패키지 배포는 하지 않으며 저장소를 복제해 사용합니다.
+shookie의 에이전트 파일 분리 방식, 범용 웹 전송·Exa 프로토콜 및 안전한 Slack 스레드 맥락/동시 실행 경계를 바탕으로 필요한 부분만 독립시켰습니다. 조직 전용 프롬프트·설정·리소스, 사내 API, GitHub 저장소 복제, 조직 DB 어댑터와 OAuth 서버는 포함하지 않습니다. Slack DM 성공 대화만 전용 로컬 SQLite에 영속 보관합니다. npm 패키지 배포는 하지 않으며 저장소를 복제해 사용합니다.
 
 ## 빠른 시작
 
@@ -74,9 +74,15 @@ npm run start:slack -- --help
 
 **실제 설치 절차·권한·개인정보·한도는 [docs/slack.md](docs/slack.md), 생성용 manifest는 [docs/slack-manifest.json](docs/slack-manifest.json)을 반드시 참고하세요.** App-level token에 `connections:write`, bot에 이벤트/history/게시 권한, 채널 초대와 권한 변경 후 재설치가 필요합니다. bot token의 채널 `conversations.replies` 지원은 실제 설치에서 확인해야 하며 실패/부분조회 시 답변 모델을 실행하지 않습니다.
 
-기존 스레드 원문은 신뢰된 이벤트 대상만 전 페이지 조회합니다. 48,000 UTF-8 byte를 넘으면 같은 모델로 도구 없이 오래된 모든 댓글을 순차 요약하고 root/최근 원문/현재 입력을 보존합니다. DM만 team/channel/thread별 bounded process-memory 최근 대화를 사용합니다. 큐·중복 억제·동시 실행·요청 기한과 안전한 Markdown Block Kit 출력을 갖추지만 **무영속·단일 프로세스**이며 재시작/TTL 밖 중복은 보장하지 않습니다.
+기존 스레드 원문은 신뢰된 이벤트 대상만 전 페이지 조회합니다. 48,000 UTF-8 byte를 넘으면 같은 모델로 도구 없이 오래된 모든 댓글을 순차 요약하고 root/최근 원문/현재 입력을 보존합니다. DM만 team/channel/thread별 전용 SQLite의 성공한 완전한 대화 쌍을 사용합니다(7일/128스레드/1MB/스레드48KB·12턴). 기본 경로는 `.local/slack-history/history.sqlite`, 선택적 로컬 `SLACK_HISTORY_DB`로 변경할 수 있습니다. 종료는 닫기만 하고 데이터는 유지합니다. 저장소 오류는 맥락 없이 답하는 대신 실패 폐쇄합니다. 큐·중복 억제는 여전히 **비영속·단일 프로세스**이며 재시작/TTL 밖 중복·Slack 게시와 DB commit의 분산 원자성은 보장하지 않습니다.
 
 **Slack 데이터는 DeepSeek로 전송됩니다.** 비밀을 Slack/외부 검색에 입력하지 마세요. 실제 Slack/LLM E2E·앱 설정 변경·배포는 실행하지 않았고 설치 후 별도 검증이 필요합니다.
+
+### Slack 검색·첨부·이미지 활성화
+
+[통합 운영 계약](docs/runtime-integration.md)을 먼저 확인하세요. Slack 도구는 `slack_search`, `slack_read_channel`, `slack_read_thread`, `slack_read_attachment`, `slack_analyze_image`입니다. 파일 후보 metadata는 접근 권한이나 읽은 내용이 아닙니다. 문서는 UTF-8 text/Markdown/CSV/텍스트 PDF(PDF.js **4.10.38**, 제한된 child), 이미지는 PNG/JPEG만 지원합니다. 검색은 공식 RTS/action_token과 설치 기능을 요구하며 사용자 OAuth/자동 가입/scan fallback은 없습니다.
+
+이미지 분석은 별도 `VISION_API_KEY`, `VISION_BASE_URL`, `VISION_MODEL`을 **모두** 명시해야 합니다. 전부 미설정이면 `VISION_CONFIG` unavailable, 일부/위험 설정이면 값 없는 설정 오류입니다. 실행 모델/DeepSeek 설정을 자동 상속하지 않습니다. 이미지 bytes를 외부 Vision 공급자에 inline 전송하며 결과는 원문 OCR이 아닌 파생 해석입니다. Slack scopes 변경과 수동 재설치, 외부 데이터 전송 정책 승인이 필요합니다.
 
 ## SamKim self-host 자동 배포
 
@@ -90,7 +96,9 @@ npm run test:deployment  # fake Docker/Git/인증 argv-env/retention/설치/보�
 bash deploy/smoke.sh ghcr.io/spread-one/my-mastra:sha-FULL_MAIN_SHA
 ```
 
-## 두 웹 도구
+## 공개 웹 도구
+
+CLI/Slack 실행은 `web_read_more` / `web_find_in_content`도 등록하며 신뢰된 세션 범위로 고정 본문을 이어 읽습니다. CLI는 프로세스/세션 UUID로 격리되고 Slack identity를 만들지 않습니다. 라이브러리 `createWebTools()` 기본값은 기존 두 도구이며 `enableContinuation:true`로 opt-in합니다. 자세한 계약은 [web-continuation.md](docs/web-continuation.md) 참고.
 
 ### `web_fetch`
 
@@ -127,7 +135,7 @@ bash deploy/smoke.sh ghcr.io/spread-one/my-mastra:sha-FULL_MAIN_SHA
 
 ### 지원하지 않는 형식 / 기능
 
-브라우저/JS 렌더링, 로그인·쿠키, PDF·이미지·영상·바이너리, UTF-8/ASCII 외 인코딩, 임의 헤더/POST, 비기본 포트, 사내·로컬 주소, 대용량 페이지는 지원하지 않습니다. MIME이 틀리거나 Exa MCP 구조가 예상과 다르면 안전하게 실패합니다. 정상 공개 페이지도 DNS·형식·크기 정책 때문에 거부될 수 있습니다. 웹 내용의 정확성·저작권·사이트 이용 정책 준수는 사용자가 확인해야 합니다.
+공개 웹 도구는 브라우저/JS 렌더링, 로그인·쿠키, PDF·이미지·영상·바이너리, UTF-8/ASCII 외 인코딩, 임의 헤더/POST, 비기본 포트, 사내·로컬 주소, 대용량 페이지는 지원하지 않습니다. MIME이 틀리거나 Exa MCP 구조가 예상과 다르면 안전하게 실패합니다. 정상 공개 페이지도 DNS·형식·크기 정책 때문에 거부될 수 있습니다. 웹 내용의 정확성·저작권·사이트 이용 정책 준수는 사용자가 확인해야 합니다.
 
 ## 구조와 프로그램 사용
 
@@ -140,7 +148,7 @@ src/
     index.ts                  # createMainAgent(model, webOptions)
     instructions.ts           # 범용 행동 / 웹 신뢰 경계
     description.ts
-    tools.ts                  # web_fetch / web_search만 조합
+    tools.ts                  # 기본 웹 도구 / 선택적 continuation 조합
   tools/web/
     network.ts                # 공개 URL·DNS 검증, IP 고정, 제한된 전송
     mcp.ts                    # 유한 MCP JSON/SSE 파싱
@@ -150,8 +158,9 @@ src/
   cli.ts                      # CLI .env 로딩과 실행 진입점
   slack.ts                    # Slack 전용 .env 로딩과 signal/종료 entry
   slack/
+    tools.ts / history/        # live attachment adapter/SDK 읽기 도구/SQLite
     config.ts / run.ts        # xoxb/xapp 검증, Bolt Socket Mode 수명주기
-    handlers.ts / runtime.ts  # 수신/게시, dedupe/직렬 큐/DM bounded memory
+    handlers.ts / runtime.ts  # 수신/게시, dedupe/직렬 큐/DM history adapter
     context.ts / model.ts     # authoritative thread/byte budget/도구 없는 요약
     format.ts / limits.ts     # 안전한 Markdown Block Kit / 운영 한도
 ```
@@ -171,7 +180,7 @@ const result = await agent.generate('공개 웹 자료를 찾아 요약해줘', 
 console.log(result.text);
 ```
 
-`createMainAgent(model, webOptions)` 및 `createMastra({ model, webOptions })`에는 Mastra가 지원하는 모델을 직접 주입할 수 있습니다. `createWebTools({ exaApiKey?, network? })`는 채팅 키와 독립적입니다. `network`의 resolver/connector는 오프라인 테스트용 신뢰된 코드 경계이며 사용자·모델 입력으로 노출하지 마세요. CLI가 아니라 직접 `agent.generate()`를 호출할 경우 입력/출력/생성 제한과 오류 비밀 제거는 호출자가 책임집니다.
+`createMainAgent(model, webOptions, extraTools?)` 및 `createMastra({ model, webOptions, extraTools? })`에는 Mastra가 지원하는 모델을 직접 주입할 수 있습니다. `createWebTools({ exaApiKey?, network? })`는 채팅 키와 독립적입니다. `network`의 resolver/connector는 오프라인 테스트용 신뢰된 코드 경계이며 사용자·모델 입력으로 노출하지 마세요. CLI가 아니라 직접 `agent.generate()`를 호출할 경우 입력/출력/생성 제한과 오류 비밀 제거는 호출자가 책임집니다.
 
 ## 검증
 

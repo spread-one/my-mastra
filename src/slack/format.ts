@@ -10,7 +10,22 @@ export function redactSecrets(text: string, secrets: readonly string[] = []): st
 
 /** Canonical conversation content; never reconstruct it from presentation blocks. */
 export function sanitizeSlackSource(text: string, secrets: readonly string[] = []): string {
-  return redactSecrets(text, secrets).replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/gu, '');
+  return redactSecrets(text, secrets).replace(/https?:\/\/files\.slack\.com\/files-pri\/[^\s"<>]+/giu, '[비공개 첨부 주소 삭제]').replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/gu, '');
+}
+
+/** Sanitize string VALUES before JSON serialization; escaped quotes/URLs must not break envelopes. */
+export function sanitizeSlackDataMessage(content: string, secrets: readonly string[] = []): string {
+  try {
+    const source = JSON.parse(content) as { source?: unknown };
+    if (!source || typeof source.source !== 'string' || !['slack_event', 'slack_thread', 'slack_thread_summary'].includes(source.source)) return sanitizeSlackSource(content, secrets);
+    const scrub = (value: unknown): unknown => {
+      if (typeof value === 'string') return sanitizeSlackSource(value, secrets);
+      if (Array.isArray(value)) return value.map(scrub);
+      if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, scrub(item)]));
+      return value;
+    };
+    return JSON.stringify(scrub(source));
+  } catch { return sanitizeSlackSource(content, secrets); }
 }
 
 export function formatSlack(text: string, secrets: readonly string[] = []) {

@@ -13,6 +13,7 @@ export class SlackRuntime {
   private threads = new Set<string>();
   private active = 0;
   private stopped = false;
+  private settledWaiters: Array<() => void> = [];
   constructor(private limits: RuntimeLimits = SLACK_LIMITS, private now = () => Date.now()) {}
 
   run(id: string, key: string, execute: Job['execute']): Promise<void> {
@@ -57,7 +58,10 @@ export class SlackRuntime {
       });
     }
   }
-  private finish(job: Job): void { clearTimeout(job.timer); this.jobs.delete(job.id); this.remember(job.id); }
+  private finish(job: Job): void {
+    clearTimeout(job.timer); this.jobs.delete(job.id); this.remember(job.id);
+    if (!this.jobs.size) for (const resolve of this.settledWaiters.splice(0)) resolve();
+  }
   private remember(id: string): void {
     this.completed.set(id, this.now());
     while (this.completed.size > this.limits.dedupeCount) this.completed.delete(this.completed.keys().next().value!);
@@ -69,6 +73,9 @@ export class SlackRuntime {
     if (this.stopped) return;
     this.stopped = true;
     for (const job of [...this.jobs.values()]) this.cancel(job);
+  }
+  settled(): Promise<void> {
+    return this.jobs.size ? new Promise(resolve => this.settledWaiters.push(resolve)) : Promise.resolve();
   }
   get size(): number { return this.jobs.size; }
 }
