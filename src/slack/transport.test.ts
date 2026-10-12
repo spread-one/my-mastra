@@ -67,6 +67,13 @@ describe('same configured model and tool-free summary over mocked SDK transport'
     const requests: Record<string, unknown>[] = [];
     const fetch = vi.fn(async (_url: unknown, init: RequestInit | undefined) => {
       requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      if (requests.at(-1)?.stream) {
+        const chunks = [
+          { choices: [{ index: 0, delta: { role: 'assistant', content: '합성 답변' }, finish_reason: null }] },
+          { choices: [{ index: 0, delta: {}, finish_reason: finish }], usage: { prompt_tokens: 2, completion_tokens: 2, total_tokens: 4 } },
+        ];
+        return new Response(chunks.map(chunk => `data: ${JSON.stringify({ id: 'synthetic', created: 0, model: 'deepseek-chat', ...chunk })}\n\n`).join('') + 'data: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } });
+      }
       return new Response(JSON.stringify({ id: 'synthetic', created: 0, model: 'deepseek-chat',
         choices: [{ index: 0, message: { role: 'assistant', content: '합성 답변' }, finish_reason: finish }],
         usage: { prompt_tokens: 2, completion_tokens: 2, total_tokens: 4 } }), { headers: { 'content-type': 'application/json' } });
@@ -88,6 +95,31 @@ describe('same configured model and tool-free summary over mocked SDK transport'
     expect(answerMessages[0]!.content).not.toContain('SECRET_DATA');
     expect(summaryMessages[0]!.role).toBe('system'); expect(summaryMessages[0]!.content).not.toContain('SECRET_SUMMARY');
     expect(summaryMessages.at(-1)!.role).toBe('user'); expect(summaryMessages.at(-1)!.content).toContain('SECRET_SUMMARY');
+  });
+  it('maps actual Mastra tool SSE chunks to stable tool-call/result progress and awaits final text', async () => {
+    let step = 0;
+    const requests: Record<string, unknown>[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (_url: unknown, init: RequestInit | undefined) => {
+      requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      const chunks = step++ === 0 ? [
+        { choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'stable-synthetic', type: 'function', function: { name: 'web_fetch', arguments: '{"url":"http://localhost/SECRET_ARGS"}' } }] }, finish_reason: null }] },
+        { choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] },
+      ] : [
+        { choices: [{ index: 0, delta: { role: 'assistant', content: '최종 답변' }, finish_reason: null }] },
+        { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
+      ];
+      return new Response(chunks.map(chunk => `data: ${JSON.stringify({ id: 'synthetic', created: 0, model: 'deepseek-chat', ...chunk })}\n\n`).join('') + 'data: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } });
+    }));
+    const progress = vi.fn();
+    const models = createSlackModels({ deepseekApiKey: 'synthetic', model: 'deepseek-chat' });
+    expect(await models.chat([{ role: 'user', content: 'synthetic' }], AbortSignal.timeout(5_000), progress)).toBe('최종 답변');
+    expect(progress.mock.calls).toEqual([
+      [{ toolCallId: 'stable-synthetic', toolName: 'web_fetch', state: 'in_progress' }],
+      [{ toolCallId: 'stable-synthetic', toolName: 'web_fetch', state: 'complete' }],
+    ]);
+    expect(JSON.stringify(progress.mock.calls)).not.toContain('SECRET_ARGS');
+    expect(requests).toHaveLength(2);
+    for (const request of requests) expect(request).toMatchObject({ stream: true, max_tokens: 4_096 });
   });
   it('does not log provider error body/keys and does not retry provider failures', async () => {
     const fetch = vi.fn(async () => new Response(JSON.stringify({ error: { message: 'xoxb-private SECRET_BODY', type: 'server_error' } }), { status: 500, headers: { 'content-type': 'application/json' } }));

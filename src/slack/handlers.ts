@@ -4,12 +4,13 @@ import { budgetSlackThread, contextBytes, eventMessage, readSlackThread, removeO
 import { formatSlack, sanitizeSlackSource, OUTPUT_LIMIT_TEXT } from './format.js';
 import { bytes, SLACK_LIMITS as limits, SlackBusyError, SlackCancelledError, SlackContextError, SlackInputError, slackCall } from './limits.js';
 import { DmCache, SlackRuntime } from './runtime.js';
+import { SlackPlan, type StreamApi } from './streaming.js';
 
 export const CONTEXT_ERROR_TEXT = '스레드 전체 맥락을 확인하지 못해 답변하지 않았습니다. 새 멘션으로 다시 시도하거나 관리자에게 채널 접근·history 권한을 확인해 달라고 요청해주세요.';
 export const GENERAL_ERROR_TEXT = '요청을 안전하게 처리하지 못했습니다. 잠시 후 새 메시지로 다시 시도해주세요.';
 export type SafeLog = (code: 'run_failed' | 'delivery_failed' | 'transport_error' | 'started' | 'stopped' | 'startup_failed') => void;
 export type SlackPost = ReturnType<typeof formatSlack> & { channel: string; thread_ts: string };
-export interface SlackClient extends RepliesClient { chat: { postMessage: (args: SlackPost) => Promise<unknown> } }
+export interface SlackClient extends RepliesClient { chat: { postMessage: (args: SlackPost) => Promise<unknown> }; apiCall?: StreamApi }
 export type EventKind = 'app_mention' | 'message';
 export interface HandlerDeps {
   client: SlackClient; chat: Chat; summarize: Summarize; runtime?: SlackRuntime; cache?: DmCache;
@@ -56,8 +57,12 @@ export function createSlackHandlers(deps: HandlerDeps) {
     const event = parseEvent(kind, raw, body, context);
     if (!event || (!event.text && event.dm && !event.oversized)) return;
     const key = JSON.stringify([event.team, event.channel, event.root]);
+    let plan: SlackPlan | undefined;
     try {
       await runtime.run(event.id, key, async signal => {
+        const deliver = async (text: string, formatted = formatSlack(text, deps.secrets)) => {
+          if (!await plan!.deliver(formatted)) await post(event, text, signal, formatted);
+        };
         try {
           if (event.oversized) throw new SlackInputError();
           let messages: ChatMessage[];
@@ -72,24 +77,27 @@ export function createSlackHandlers(deps: HandlerDeps) {
             if (contextBytes(messages) > limits.contextBytes) throw new SlackInputError();
           }
           signal.throwIfAborted();
-          const answer = !event.text && event.root === event.current ? '네, 무엇을 도와드릴까요?' : await deps.chat(messages, signal);
+          plan = new SlackPlan(deps.client.apiCall?.bind(deps.client), { channel: event.channel, thread_ts: event.root,
+            recipient_team_id: event.team, recipient_user_id: event.user }, signal);
+          await plan.open();
+          const answer = !event.text && event.root === event.current ? '네, 무엇을 도와드릴까요?' : await deps.chat(messages, signal, plan.progress);
           signal.throwIfAborted();
           const canonicalAnswer = sanitizeSlackSource(answer, deps.secrets);
           let safeAnswer = canonicalAnswer;
-          if (!safeAnswer.trim()) { await post(event, OUTPUT_LIMIT_TEXT, signal); return; }
+          if (!safeAnswer.trim()) { await deliver(OUTPUT_LIMIT_TEXT); return; }
           const summarized = messages.some(message => message.content.includes('"source":"slack_thread_summary"'));
           if (summarized) safeAnswer = sanitizeSlackSource('참고: 오래된 스레드 댓글은 요약된 맥락으로 답변합니다.\n\n', deps.secrets) + canonicalAnswer;
           // Validate/render once, after the notice; canonical source stays Markdown.
           let formatted: ReturnType<typeof formatSlack>;
           try { formatted = formatSlack(safeAnswer); }
-          catch { await post(event, OUTPUT_LIMIT_TEXT, signal); return; }
-          await post(event, safeAnswer, signal, formatted);
+          catch { await deliver(OUTPUT_LIMIT_TEXT); return; }
+          await deliver(safeAnswer, formatted);
           signal.throwIfAborted();
           if (event.dm) cache.set(key, [...messages, { role: 'assistant', content: canonicalAnswer }]);
         } catch (error) {
           if (event.dm) cache.delete(key);
           throw error;
-        }
+        } finally { await plan?.cleanup(); plan?.dispose(); }
       });
     } catch (error) {
       if (stopped) return;
@@ -98,6 +106,7 @@ export function createSlackHandlers(deps: HandlerDeps) {
         ? '현재 요청이 많습니다. 잠시 후 새 메시지로 다시 시도해주세요.' : error instanceof SlackInputError
         ? '메시지가 너무 깁니다. 내용을 나누어 보내주세요.' : error instanceof SlackCancelledError
         ? '요청 시간 제한을 초과해 답변하지 않았습니다. 더 짧은 질문으로 다시 시도해주세요.' : GENERAL_ERROR_TEXT;
+      if (plan?.suppressNotice) return;
       // One separately bounded error notice outside the expired invocation; never an unbounded queue.
       if (notices.size >= limits.concurrency || notices.has(key)) return;
       const notice = new AbortController(); notices.set(key, notice);

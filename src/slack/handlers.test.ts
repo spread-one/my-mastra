@@ -209,3 +209,94 @@ describe('duplicate/thread/DM/deadline integration', () => {
     expect(f.chat).toHaveBeenCalledTimes(3); expect(f.postMessage.mock.calls[3]![0].text).toContain('메시지가 너무 깁니다'); f.shutdown();
   });
 });
+
+
+describe('ancillary streaming delivery and canonical cache', () => {
+  function streaming(api = vi.fn(async (_method: string, _args: Record<string, unknown>): Promise<unknown> => ({ ok: true, ts: '200.1' })), chat: HandlerDeps['chat'] = async (_messages, _signal, progress) => {
+    await progress?.({ toolCallId: 'private query/URL', toolName: 'web_search', state: 'in_progress' });
+    await progress?.({ toolCallId: 'private query/URL', toolName: 'web_search', state: 'complete' });
+    return '## 회의\n\n**결정** <@U2> sk-private';
+  }, runtime?: SlackRuntime) {
+    const postMessage = vi.fn(async (_args: SlackPost) => ({ ok: true }));
+    const client = { conversations: { replies: vi.fn(async () => ({ ok: true, messages: source })) }, chat: { postMessage }, apiCall: api };
+    const f = fixture({ client, chat, secrets: ['sk-private'], runtime });
+    return { ...f, api, posted: postMessage };
+  }
+  it('stops once with rendered safe blocks and commits only canonical successful DM text', async () => {
+    const f = streaming();
+    await f.receive('message', dm('hello', '101.0'), body('stream-dm'), context);
+    expect(f.posted).not.toHaveBeenCalled();
+    expect(f.api.mock.calls.map(call => call[0])).toEqual(['chat.startStream', 'chat.appendStream', 'chat.appendStream', 'chat.stopStream']);
+    expect(f.api.mock.calls[0]![1]).toMatchObject({ channel: 'D1', thread_ts: '101.0', recipient_team_id: 'T1', recipient_user_id: 'U3' });
+    const final = f.api.mock.calls.at(-1)![1];
+    expect(final).toMatchObject({ channel: 'D1', ts: '200.1', mrkdwn: false, unfurl_links: false });
+    expect(JSON.stringify(final.blocks)).toContain('header');
+    expect(JSON.stringify(f.api.mock.calls)).not.toMatch(/private|<@U2>/u);
+    const messages = f.cache.get(JSON.stringify(['T1', 'D1', '101.0']));
+    expect(messages.at(-1)!.content).toContain('**결정**');
+    expect(messages.at(-1)!.content).not.toContain('sk-private'); f.shutdown();
+  });
+  it('unsupported transport falls back to one ordinary answer without rerunning model', async () => {
+    const api = vi.fn(async () => ({ ok: false, error: 'unknown_method' }));
+    const chat = vi.fn(async () => 'answer'); const f = streaming(api, chat);
+    await f.receive('message', dm('hello', '101.0'), body('unsupported'), context);
+    expect(chat).toHaveBeenCalledOnce(); expect(api).toHaveBeenCalledOnce(); expect(f.posted).toHaveBeenCalledOnce();
+    expect(f.cache.size).toBe(1); f.shutdown();
+  });
+  it.each(['opening', 'stopping'])('ambiguous %s never posts a duplicate/error answer or commits cache', async phase => {
+    const api = vi.fn(async (method: string): Promise<unknown> => {
+      if (method === (phase === 'opening' ? 'chat.startStream' : 'chat.stopStream')) throw new Error('SECRET_BODY');
+      return { ok: true, ts: '200.1' };
+    });
+    const f = streaming(api);
+    await f.receive('message', dm('hello', '101.0'), body(phase), context);
+    expect(f.posted).not.toHaveBeenCalled(); expect(f.cache.size).toBe(0);
+    expect(api.mock.calls.filter(call => call[0] === 'chat.stopStream')).toHaveLength(phase === 'opening' ? 0 : 1); f.shutdown();
+  });
+  it('model failure closes the known stream once without leaking error or a separate post', async () => {
+    const f = streaming(undefined, async () => { throw new Error('SECRET_MODEL'); });
+    await f.receive('message', dm('hello', '101.0'), body('model-fail'), context);
+    expect(f.api.mock.calls.at(-1)).toEqual(['chat.stopStream', { channel: 'D1', ts: '200.1' }]);
+    expect(f.posted).not.toHaveBeenCalled(); expect(f.cache.size).toBe(0); f.shutdown();
+  });
+  it.each(['deadline', 'shutdown'])('cleans late creation on %s without late model/cache/post commits', async mode => {
+    vi.useFakeTimers();
+    let resolve!: (value: unknown) => void;
+    const api = vi.fn(async (_method: string): Promise<unknown> => ({ ok: true }));
+    api.mockImplementationOnce(() => new Promise(yes => { resolve = yes; }));
+    const runtime = new SlackRuntime({ ...SLACK_LIMITS, deadlineMs: 100 });
+    const chat = vi.fn(async () => 'late answer'); const f = streaming(api, chat, runtime);
+    const received = f.receive('message', dm('hello', '101.0'), body(mode), context); await tick();
+    if (mode === 'deadline') await vi.advanceTimersByTimeAsync(100); else f.shutdown();
+    await received; resolve({ ok: true, ts: '200.2' }); await tick();
+    expect(api.mock.calls.at(-1)).toEqual(['chat.stopStream', { channel: 'D1', ts: '200.2' }]);
+    expect(chat).not.toHaveBeenCalled(); expect(f.posted).not.toHaveBeenCalled(); expect(f.cache.size).toBe(0); f.shutdown();
+  });
+  it('deadline closes an opened stream while a noncooperative model retains its runtime slot', async () => {
+    vi.useFakeTimers(); let resolve!: (answer: string) => void;
+    const runtime = new SlackRuntime({ ...SLACK_LIMITS, deadlineMs: 100 });
+    const f = streaming(undefined, () => new Promise(yes => { resolve = yes; }), runtime);
+    const received = f.receive('message', dm('hello', '101.0'), body('late-model'), context); await tick();
+    await vi.advanceTimersByTimeAsync(100); await received;
+    expect(runtime.size).toBe(1); expect(f.api.mock.calls.at(-1)).toEqual(['chat.stopStream', { channel: 'D1', ts: '200.1' }]);
+    resolve('late secret answer'); await tick();
+    expect(runtime.size).toBe(0); expect(f.api).toHaveBeenCalledTimes(2); expect(f.cache.size).toBe(0); expect(f.posted).not.toHaveBeenCalled(); f.shutdown();
+  });
+  it('stream final carries exactly one summary notice and the original channel/thread recipients', async () => {
+    const older = Array.from({ length: 18 }, (_, i) => ({ ts: `100.${String(i + 2).padStart(6, '0')}`, thread_ts: '100.000001', user: 'U2', text: `old${i}: ${'한'.repeat(1_500)}` }));
+    const api = vi.fn(async (_method: string, _args: Record<string, unknown>) => ({ ok: true, ts: '200.1' }));
+    const postMessage = vi.fn(async () => ({ ok: true }));
+    const f = fixture({ client: { apiCall: api, chat: { postMessage }, conversations: { replies: async () => ({ ok: true,
+      messages: [{ ...source[0], reply_count: 19 }, ...older, { ...source.at(-1), ts: '100.000020' }] }) } } });
+    await f.receive('app_mention', event({ ts: '100.000020', thread_ts: '100.000001' }), body('stream-summary', 'T2'), context);
+    expect(api.mock.calls[0]![1]).toMatchObject({ channel: 'C1', thread_ts: '100.000001', recipient_team_id: 'T2', recipient_user_id: 'U3' });
+    expect(String(api.mock.calls.at(-1)![1].text).match(/요약된 맥락/gu)).toHaveLength(1);
+    expect(postMessage).not.toHaveBeenCalled(); expect(f.summarize).toHaveBeenCalled(); expect(f.chat).toHaveBeenCalledOnce(); f.shutdown();
+  });
+  it('over-limit output is a fixed notice through stop, never cached or duplicated', async () => {
+    const f = streaming(undefined, async () => 'x'.repeat(20_001));
+    await f.receive('message', dm('hello', '101.0'), body('stream-limit'), context);
+    expect(f.api.mock.calls.at(-1)![1].text).toBe(OUTPUT_LIMIT_TEXT);
+    expect(f.posted).not.toHaveBeenCalled(); expect(f.cache.size).toBe(0); f.shutdown();
+  });
+});
