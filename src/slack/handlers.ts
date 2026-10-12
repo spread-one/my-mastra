@@ -74,17 +74,18 @@ export function createSlackHandlers(deps: HandlerDeps) {
           signal.throwIfAborted();
           const answer = !event.text && event.root === event.current ? '네, 무엇을 도와드릴까요?' : await deps.chat(messages, signal);
           signal.throwIfAborted();
-          let safeAnswer = sanitizeSlackSource(answer, deps.secrets);
+          const canonicalAnswer = sanitizeSlackSource(answer, deps.secrets);
+          let safeAnswer = canonicalAnswer;
           if (!safeAnswer.trim()) { await post(event, OUTPUT_LIMIT_TEXT, signal); return; }
           const summarized = messages.some(message => message.content.includes('"source":"slack_thread_summary"'));
-          if (summarized) safeAnswer = '참고: 오래된 스레드 댓글은 요약된 맥락으로 답변합니다.\n\n' + safeAnswer;
+          if (summarized) safeAnswer = sanitizeSlackSource('참고: 오래된 스레드 댓글은 요약된 맥락으로 답변합니다.\n\n', deps.secrets) + canonicalAnswer;
           // Validate/render once, after the notice; canonical source stays Markdown.
           let formatted: ReturnType<typeof formatSlack>;
           try { formatted = formatSlack(safeAnswer); }
           catch { await post(event, OUTPUT_LIMIT_TEXT, signal); return; }
           await post(event, safeAnswer, signal, formatted);
           signal.throwIfAborted();
-          if (event.dm) cache.set(key, [...messages, { role: 'assistant', content: safeAnswer }]);
+          if (event.dm) cache.set(key, [...messages, { role: 'assistant', content: canonicalAnswer }]);
         } catch (error) {
           if (event.dm) cache.delete(key);
           throw error;

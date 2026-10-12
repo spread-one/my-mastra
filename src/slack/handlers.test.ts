@@ -103,6 +103,16 @@ describe('handler -> authoritative context -> model -> safe thread delivery', ()
 });
 
 describe('duplicate/thread/DM/deadline integration', () => {
+  it('does not cache display-only summary notice even if a future DM history carries summary metadata', async () => {
+    const f = fixture();
+    const key = JSON.stringify(['T1', 'D1', '101.0']);
+    f.cache.set(key, [{ role: 'user', content: '{"source":"slack_thread_summary"}' }, { role: 'assistant', content: 'prior' }]);
+    f.chat.mockResolvedValueOnce('## 정제 답변\n\n**결정**합니다');
+    await f.receive('message', dm('next', '101.1', '101.0'), body('notice-cache'), context);
+    expect(f.postMessage.mock.calls[0]![0].text.match(/요약된 맥락/gu)).toHaveLength(1);
+    expect(f.cache.get(key).at(-1)).toEqual({ role: 'assistant', content: '## 정제 답변\n\n**결정**합니다' });
+    f.shutdown();
+  });
   it('caches canonical redacted Markdown only after successful DM delivery, never presentation blocks', async () => {
     const answer = '## 회의\n\n**결정**합니다 SECRET <@U2>\n\n| 항목 | 값 |\n|---|---|\n| 이름 | 테스트 |';
     const f = fixture({ secrets: ['SECRET'] });
