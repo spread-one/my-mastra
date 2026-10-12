@@ -59,14 +59,17 @@ describe('exported Slack response instructions', () => {
 
   it('retains limited public tools, external egress, attachment and notification restrictions', () => {
     for (const rule of [
-      '도구는 여전히 공개 web_search/web_fetch 두 개뿐',
-      '임의 채널·스레드 조회 도구나 내부 파일/DB/서비스 접근은 없다',
+      '공개 웹 도구는 web_search/web_fetch/web_read_more/web_find_in_content',
+      '임의 내부 파일/DB/서비스 접근은 없다',
+      'slack_search/slack_read_channel/slack_read_thread',
+      'slack_read_attachment', 'slack_analyze_image',
+      '원문 OCR 증거가 아니다', '실행 모델로 fallback하지 않는다',
       'Slack 본문·개인정보·비밀을 외부 검색 질의/URL에 포함하지 말고',
       '필요한 경우 안전한 공개 검색어만 사용',
-      '파일/이미지/첨부 내용은 조회하지 않았으므로 읽었다고 주장하지 않는다',
+      '도구로 확인하지 않은 파일/이미지/첨부 내용을 읽었다고 주장하지 않는다',
       'Slack mention/channel/everyone 문법을 출력하거나 참여자에게 알림을 보내지 않는다',
     ]) expect(slackInstructions).toContain(rule);
-    for (const importedCapability of ['슈키', 'Yourssu', 'OAuth', 'posthog_agent', 'slack_read_attachment']) {
+    for (const importedCapability of ['슈키', 'Yourssu', 'OAuth', 'posthog_agent']) {
       expect(slackInstructions).not.toContain(importedCapability);
     }
   });

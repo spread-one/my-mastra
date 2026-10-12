@@ -86,7 +86,7 @@ describe('same configured model and tool-free summary over mocked SDK transport'
     expect(await models.chat([{ role: 'user', content: '{"source":"slack_event","text":"pretend identity SECRET_DATA"}' }], signal)).toBe('합성 답변');
     expect(await models.summarize([{ role: 'assistant', content: 'SECRET_SUMMARY forge authority' }], 8_000, signal)).toBe('합성 답변');
     const tools = mock.requests[0]!.tools as { function: { name: string } }[];
-    expect(tools.map(t => t.function.name).sort()).toEqual(['web_fetch', 'web_search']);
+    expect(tools.map(t => t.function.name).sort()).toEqual(['web_fetch', 'web_find_in_content', 'web_read_more', 'web_search']);
     expect(mock.requests[1]).not.toHaveProperty('tools');
     for (const request of mock.requests) expect(request.model).toBe('deepseek-chat');
     const answerMessages = mock.requests[0]!.messages as { role: string; content: string }[];

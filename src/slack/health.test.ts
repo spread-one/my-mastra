@@ -16,7 +16,9 @@ vi.mock('@slack/bolt', () => ({
   },
   App: class { client = {}; start = sdk.start; stop = sdk.stop; error() {} },
 }));
-vi.mock('./handlers.js', () => ({ registerSlackHandlers: () => ({ shutdown: () => {} }) }));
+vi.mock('./history/index.js', () => ({ openSqliteHistory: async () => ({ close: async () => {} }), HistoryError: class extends Error {} }));
+vi.mock('../tools/slack/index.js', () => ({ createSlackReadClient: () => ({}) }));
+vi.mock('./handlers.js', () => ({ HISTORY_ERROR_TEXT: 'history unavailable', registerSlackHandlers: () => ({ shutdown: () => {} }) }));
 vi.mock('./model.js', () => ({ createSlackModels: () => ({}) }));
 import { createSlackSession, runSlack } from './run.js';
 const config = { deepseekApiKey: 'synthetic', model: 'deepseek-chat', botToken: 'xoxb-synthetic', appToken: 'xapp-synthetic' };
@@ -46,7 +48,7 @@ describe('file health uses completed Slack start and live SDK hello/socket state
     expect(sdk.receiverOptions[0]).toMatchObject({ installerOptions: { clientOptions: { retryConfig: { retries: 0 }, rejectRateLimitedCalls: true } } });
     expect(sdk.receiverOptions[0]).not.toHaveProperty('clientId');
     expect(session.ready!()).toBe(false); const start = session.start(); client.emit('connected');
-    expect(session.ready!()).toBe(false); resolve(); await start; expect(session.ready!()).toBe(true);
+    expect(session.ready!()).toBe(false); await vi.waitFor(() => expect(resolve).toBeTypeOf('function')); resolve(); await start; expect(session.ready!()).toBe(true);
     client.websocket.isActive = () => false; expect(session.ready!()).toBe(false);
     client.websocket.isActive = () => true;
     for (const event of ['close', 'disconnected', 'disconnecting', 'reconnecting']) {
