@@ -168,7 +168,12 @@ describe('deadlines, bytes, types and extraction', () => {
 });
 
 describe('tools and Exa',()=>{
-  it('registers fetch and keyless search',()=>expect(Object.keys(createWebTools())).toEqual(['web_fetch','web_search','web_read_more','web_find_in_content']));
+  it('registers fetch and keyless search',()=>expect(Object.keys(createWebTools())).toEqual(['web_fetch','web_search']));
+  it('only exposes continuation tools on explicit opt-in', () => {
+    expect(Object.keys(createWebTools({ enableContinuation: true }))).toEqual(['web_fetch','web_search','web_read_more','web_find_in_content']);
+    expect(createWebTools().web_fetch!.description).not.toMatch(/web_read_more|web_find_in_content|contentId/);
+    expect(createWebTools({ enableContinuation: true }).web_fetch!.description).toContain('web_read_more');
+  });
   it('validates bounded query/count',()=>{
     expect(searchInput.safeParse({query:' ',count:1}).success).toBe(false);
     expect(searchInput.safeParse({query:'a'.repeat(401),count:1}).success).toBe(false);

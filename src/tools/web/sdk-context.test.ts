@@ -33,7 +33,7 @@ describe('Mastra continuation context integration', () => {
       const message = call ? { role: 'assistant', content: null, tool_calls: [{ id: `call${step}`, type: 'function', function: { name: call[0], arguments: JSON.stringify(call[1]) } }] } : { role: 'assistant', content: 'done' };
       return new Response(JSON.stringify({ id: 'fixture', created: 0, model: 'deepseek-chat', choices: [{ index: 0, message, finish_reason: call ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 } }), { headers: { 'content-type': 'application/json' } });
     });
-    const agent = new Agent({ id: 'web-context-test', name: 'Web context test', instructions: 'Use web tools.', model: createDeepSeek({ apiKey: 'synthetic', fetch })('deepseek-chat'), tools: createWebTools({ contentStore: new ContentStore(), network: { resolver: async () => [{ address: '93.184.216.34', family: 4 }], connector } }) });
+    const agent = new Agent({ id: 'web-context-test', name: 'Web context test', instructions: 'Use web tools.', model: createDeepSeek({ apiKey: 'synthetic', fetch })('deepseek-chat'), tools: createWebTools({ enableContinuation: true, contentStore: new ContentStore(), network: { resolver: async () => [{ address: '93.184.216.34', family: 4 }], connector } }) });
     const requestContext = new RequestContext<unknown>(Object.entries({ teamId: 'T', userId: 'U', channel: 'C', threadTs: '1.1' }));
     expect((await agent.generate('read', { requestContext, maxSteps: 5 })).text).toBe('done');
     expect(results).toHaveLength(3);

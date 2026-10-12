@@ -4,10 +4,11 @@ import { RequestContext } from '@mastra/core/request-context';
 import { PassThrough } from 'node:stream';
 import type http from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { createWebTools, findInput } from './tools.js';
+import { createWebTools as createTools, findInput } from './tools.js';
 import { ContentStore, CONTENT_LIMITS, contentScope, textWindow } from './content.js';
 import { LIMITS, type Connector } from './network.js';
 
+const createWebTools = (options: Parameters<typeof createTools>[0] = {}) => createTools({ ...options, enableContinuation: true });
 const identity = { teamId: 'T1', userId: 'U1', channel: 'C1', threadTs: '123.456' };
 function context(changes: Record<string, unknown> = {}) { return new RequestContext<unknown>(Object.entries({ ...identity, ...changes })); }
 function fixture(body: string | Buffer = 'hello', contentType = 'text/plain') {
@@ -27,6 +28,17 @@ const scope = contentScope(context())!;
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe('source-bound continuation', () => {
+  it('default fetch keeps legacy output and does not store hidden snapshots even with trusted scope', async () => {
+    const store = new ContentStore(); const put = vi.spyOn(store, 'put');
+    for (const enableContinuation of [undefined, false]) {
+      const tools = createTools({ enableContinuation, network: fixture('legacy'), contentStore: store });
+      const result = await run(tools, 'web_fetch', { url: source.originalUrl }, context());
+      expect(result).toMatchObject({ ok: true, text: 'legacy', evidence: 'fetched_text' });
+      for (const key of ['contentId', 'expiresAt', 'storage', 'offset', 'endOffset', 'nextOffset', 'totalChars', 'totalBytes', 'offsetUnit']) expect(result).not.toHaveProperty(key);
+      expect(Object.keys(tools)).toEqual(['web_fetch', 'web_search']);
+    }
+    expect(put).not.toHaveBeenCalled();
+  });
   it('finds and reads a marker only after 30k, retaining one download and immutable source', async () => {
     const body = '앞'.repeat(31_000) + '\nMARKER 한글😀\n끝';
     const network = fixture(body);
@@ -129,6 +141,24 @@ describe('bounded store lifecycle', () => {
       store.put(scope, source, 'three');
       expect(() => store.get(one.contentId, scope)).toThrow('CONTENT_UNAVAILABLE');
     }
+  });
+  it('evicts the globally oldest snapshot across actors before TTL, without refreshing on reads', () => {
+    let now = 1000;
+    const store = new ContentStore({ ...CONTENT_LIMITS, entries: 2, ttlMs: 1000 }, () => now);
+    const other = contentScope(context({ userId: 'other' }))!;
+    const oldest = store.put(scope, source, 'oldest')!;
+    now = 1100;
+    const second = store.put(other, source, 'second')!;
+    store.get(oldest.contentId, scope);
+    now = 1200;
+    const newest = store.put(other, source, 'newest')!;
+    expect(now).toBeLessThan(Date.parse(oldest.expiresAt));
+    expect(() => store.get(oldest.contentId, scope)).toThrow('CONTENT_UNAVAILABLE');
+    expect(store.get(second.contentId, other).text).toBe('second');
+    expect(store.get(newest.contentId, other).text).toBe('newest');
+    now = 2100;
+    expect(() => store.get(second.contentId, other)).toThrow('CONTENT_UNAVAILABLE');
+    expect(store.get(newest.contentId, other).text).toBe('newest');
   });
   it('charges text and metadata, rejecting per-actor/global oversize without leaking a cache ID', async () => {
     const store = new ContentStore({ ...CONTENT_LIMITS, actorBytes: 1200 });
