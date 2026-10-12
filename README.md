@@ -74,7 +74,7 @@ npm run start:slack -- --help
 
 **실제 설치 절차·권한·개인정보·한도는 [docs/slack.md](docs/slack.md), 생성용 manifest는 [docs/slack-manifest.json](docs/slack-manifest.json)을 반드시 참고하세요.** App-level token에 `connections:write`, bot에 이벤트/history/게시 권한, 채널 초대와 권한 변경 후 재설치가 필요합니다. bot token의 채널 `conversations.replies` 지원은 실제 설치에서 확인해야 하며 실패/부분조회 시 답변 모델을 실행하지 않습니다.
 
-기존 스레드 원문은 신뢰된 이벤트 대상만 전 페이지 조회합니다. 48,000 UTF-8 byte를 넘으면 같은 모델로 도구 없이 오래된 모든 댓글을 순차 요약하고 root/최근 원문/현재 입력을 보존합니다. DM만 team/channel/thread별 bounded process-memory 최근 대화를 사용합니다. 큐·중복 억제·동시 실행·요청 기한과 안전한 plain-text blocks 출력을 갖추지만 **무영속·단일 프로세스**이며 재시작/TTL 밖 중복은 보장하지 않습니다.
+기존 스레드 원문은 신뢰된 이벤트 대상만 전 페이지 조회합니다. 48,000 UTF-8 byte를 넘으면 같은 모델로 도구 없이 오래된 모든 댓글을 순차 요약하고 root/최근 원문/현재 입력을 보존합니다. DM만 team/channel/thread별 bounded process-memory 최근 대화를 사용합니다. 큐·중복 억제·동시 실행·요청 기한과 안전한 Markdown Block Kit 출력을 갖추지만 **무영속·단일 프로세스**이며 재시작/TTL 밖 중복은 보장하지 않습니다.
 
 **Slack 데이터는 DeepSeek로 전송됩니다.** 비밀을 Slack/외부 검색에 입력하지 마세요. 실제 Slack/LLM E2E·앱 설정 변경·배포는 실행하지 않았고 설치 후 별도 검증이 필요합니다.
 
@@ -153,7 +153,7 @@ src/
     config.ts / run.ts        # xoxb/xapp 검증, Bolt Socket Mode 수명주기
     handlers.ts / runtime.ts  # 수신/게시, dedupe/직렬 큐/DM bounded memory
     context.ts / model.ts     # authoritative thread/byte budget/도구 없는 요약
-    format.ts / limits.ts     # 안전한 plain-text blocks / 운영 한도
+    format.ts / limits.ts     # 안전한 Markdown Block Kit / 운영 한도
 ```
 
 라이브러리 import는 `.env`를 읽거나 모델/네트워크를 초기화하지 않습니다. 호출 시 환경을 명시하거나, 호출자에서 `dotenv/config`를 로딩하세요.

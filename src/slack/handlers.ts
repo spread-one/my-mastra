@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { Chat, ChatMessage } from '../chat.js';
 import { budgetSlackThread, contextBytes, eventMessage, readSlackThread, removeOwnMention, validTs, type RepliesClient, type Summarize } from './context.js';
-import { formatSlack, OUTPUT_LIMIT_TEXT } from './format.js';
+import { formatSlack, sanitizeSlackSource, OUTPUT_LIMIT_TEXT } from './format.js';
 import { bytes, SLACK_LIMITS as limits, SlackBusyError, SlackCancelledError, SlackContextError, SlackInputError, slackCall } from './limits.js';
 import { DmCache, SlackRuntime } from './runtime.js';
 
@@ -45,10 +45,10 @@ export function createSlackHandlers(deps: HandlerDeps) {
   // No notice queue; drop excess notices (or simultaneous same-thread notices) during overload.
   const notices = new Map<string, AbortController>();
   const log = deps.log ?? (() => {});
-  const post = async (event: TrustedEvent, text: string, signal: AbortSignal) => {
+  const post = async (event: TrustedEvent, text: string, signal: AbortSignal, formatted = formatSlack(text, deps.secrets)) => {
     signal.throwIfAborted();
     const response = object(await slackCall(() => deps.client.chat.postMessage({ channel: event.channel, thread_ts: event.root,
-      ...formatSlack(text, deps.secrets) }), signal));
+      ...formatted }), signal));
     if (response.ok !== true || response.error || response.warning || (object(response.response_metadata).warnings as unknown[] | undefined)?.length) throw new Error('SLACK_DELIVERY_FAILED');
   };
   async function receive(kind: EventKind, raw: unknown, body: unknown, context: unknown): Promise<void> {
@@ -74,17 +74,15 @@ export function createSlackHandlers(deps: HandlerDeps) {
           signal.throwIfAborted();
           const answer = !event.text && event.root === event.current ? '네, 무엇을 도와드릴까요?' : await deps.chat(messages, signal);
           signal.throwIfAborted();
-          let safeAnswer: string;
-          try {
-            const formatted = formatSlack(answer, deps.secrets);
-            safeAnswer = formatted.blocks.map(block => block.text.text).join('');
-          } catch { await post(event, OUTPUT_LIMIT_TEXT, signal); return; }
+          let safeAnswer = sanitizeSlackSource(answer, deps.secrets);
+          if (!safeAnswer.trim()) { await post(event, OUTPUT_LIMIT_TEXT, signal); return; }
           const summarized = messages.some(message => message.content.includes('"source":"slack_thread_summary"'));
           if (summarized) safeAnswer = '참고: 오래된 스레드 댓글은 요약된 맥락으로 답변합니다.\n\n' + safeAnswer;
-          // Check after adding the notice; never silently truncate.
-          try { formatSlack(safeAnswer, deps.secrets); }
+          // Validate/render once, after the notice; canonical source stays Markdown.
+          let formatted: ReturnType<typeof formatSlack>;
+          try { formatted = formatSlack(safeAnswer); }
           catch { await post(event, OUTPUT_LIMIT_TEXT, signal); return; }
-          await post(event, safeAnswer, signal);
+          await post(event, safeAnswer, signal, formatted);
           signal.throwIfAborted();
           if (event.dm) cache.set(key, [...messages, { role: 'assistant', content: safeAnswer }]);
         } catch (error) {
