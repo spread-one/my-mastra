@@ -6,6 +6,12 @@ The original checkout is not modified. The library foundation is now wired into 
 It does not implement cancellation commands, OAuth, auto-join, fallback history scans,
 attachment downloads, or privileged alternate credentials.
 
+## Optional human-readable context
+
+Automatic context and registered channel/thread/search tools add optional `channelName` and `author.displayName` only after live access validation. Channel names reuse validated `conversations.info`; authors use the same installed bot credential's `users.info`, or `bots.info` only when no user author exists. No email, arbitrary profile fields, persistent dedicated lookup cache or permission grant is retained. Optional channel/author display names can be stored inside successfully delivered, bounded DM SQLite conversation payloads under the existing history TTL and size/turn limits; this conversation history is not a dedicated lookup cache. User names prefer inspected primitive profile `display_name`, `real_name`, then `name`; missing/unsafe metadata uses generic participant/bot wording, never guessed roles or names.
+
+Each enrichment batch has at most eight unique author lookups, logical concurrency two and an 800 ms logical display deadline (not a global physical-request concurrency cap). Late results are discarded; physical requests are not necessarily canceled at 800 ms. They remain bounded by the no-retry SDK transport timeout (10 seconds), operation deadline (15 seconds), and existing runtime admission/concurrency semaphore. Accessors/proxies are not executed. Redacted, JSON-escaped names count toward final whole-context/tool JSON budgets. IDs remain API addresses and authorization evidence, not unsolicited normal-answer diagnostics. Meaningful partial-reading limitations remain natural-language caveats. The manifest adds bot `users:read`; existing installations still require manual reinstall/reapproval. No installation or live Slack/provider checks were performed.
+
 ## Integration API
 
 Import from `src/tools/slack/index.ts` (compiled `dist/tools/slack/index.js`).
@@ -147,8 +153,10 @@ checks, even if known author/kind/thread metadata differ. This is legacy accepta
 not a metadata equivalence assertion or a full-thread grant; scope, address and
 parent-not-after-message validation still apply to every record. No source synthesis.
 Optional `channelName` comes from live channel metadata, is display-only untrusted
-data, and never affects permission, addressing, query or identity. Display `#name`
-when present, otherwise `<#channelID>`; keep returned permalink as provenance.
+data, and never affects permission, addressing, query or identity. In ordinary responses,
+display `#name` when present, otherwise use generic channel wording; keep returned permalink
+as provenance. IDs are only for API addressing or necessary explicitly requested diagnostics,
+not an ordinary-response fallback or notification mention.
 
 `status: ok` with zero records is a successfully validated empty result. Unsupported
 SDK transport/install/token, access denial, 429, malformed/warning/partial failure

@@ -1,7 +1,8 @@
 import { scopedSlackClient } from "./transport.js";
+import { displayName, enrichAuthors } from './display.js';
 import { createHash, randomUUID } from "node:crypto";
 import type { WebClient } from "@slack/web-api";
-import { getSlackSearchActionToken, type SlackReadIdentity } from "./context.js";
+import { getSlackExecutionSignal, getSlackSearchActionToken, type SlackReadIdentity } from "./context.js";
 import { authorizeCurrentSlackChannel, requireSlackReadIdentity } from "./authorization.js";
 import { check, deny, invalid, unavailable, errorResult, readLimits as limits } from "./errors.js";
 import { channelInput, threadInput, publicChannelId, slackTs, type ReadResult } from "./schemas.js";
@@ -9,7 +10,7 @@ import { SlackSearcher } from "./search.js";
 import { jsonTextPrefix } from "./projection.js";
 import { authorizePublicSlackThread } from "./public-authorization.js";
 
-export type SlackReadClient = Pick<WebClient, "auth" | "conversations"> & Partial<Pick<WebClient, "apiCall">>;
+export type SlackReadClient = Pick<WebClient, "auth" | "conversations"> & Partial<Pick<WebClient, "apiCall" | "users" | "bots">>;
 function timestamp(ts: string) { return BigInt(ts.replace(".", "")); }
 type Target = { channel: string; threadTs?: string; host?: string };
 type Continuation = { binding: string; slackCursor: string; page: number;
@@ -21,7 +22,7 @@ export class SlackReader {
   private readonly cursors = new Map<string, Continuation>();
   private readonly inFlightCursors = new Set<string>();
   private readonly searcher: SlackSearcher;
-  constructor(private readonly client: SlackReadClient) { this.searcher = new SlackSearcher(client); }
+  constructor(private readonly client: SlackReadClient, private readonly displaySecrets: readonly string[] = []) { this.searcher = new SlackSearcher(client, displaySecrets); }
 
   private target(input: { channel?: string; ts?: string; url?: string }, identity: SlackReadIdentity, thread: boolean): Target {
     let channel = input.channel ?? identity.channel, threadTs = input.ts, host: string | undefined;
@@ -64,7 +65,9 @@ export class SlackReader {
         this.inFlightCursors.add(lockedCursor);
       }
       const origin = await authorizeCurrentSlackChannel(client, context, { workspaceHost: target.host });
-      if (target.channel !== identity.channel) await authorizePublicSlackThread(client, origin, target.channel);
+      const channelName = displayName(target.channel !== identity.channel
+        ? (await authorizePublicSlackThread(client, origin, target.channel)).name : origin.channelName, [...this.displaySecrets, actionToken ?? '']);
+      const display = channelName ? { channelName } : {};
       const cursor = previous?.slackCursor;
       // Observed replies pages include the parent in addition to requested replies.
       // Reserve its slot on every page; the published response bound stays unchanged.
@@ -81,7 +84,7 @@ export class SlackReader {
       const messages: ReadResult["messages"] = [];
       const seen = new Set(previous?.seen ?? []);
       const fingerprints = { ...(previous?.fingerprints ?? {}) };
-      let budget = limits.maxPageBytes, lossy = previous?.lossy ?? false;
+      let budget = limits.maxPageBytes - 2_048, lossy = previous?.lossy ?? false;
       let rootReplyCount = previous?.rootReplyCount;
       for (const [index, raw] of response.messages.entries()) {
         const m = raw as typeof raw & { channel?: string; team?: string; subtype?: string };
@@ -115,7 +118,7 @@ export class SlackReader {
         const safeText = actionToken ? m.text.split(actionToken).join("[SLACK_ACTION_TOKEN_REDACTED]") : m.text;
         const text = jsonTextPrefix(safeText, Math.min(8_000, Math.max(0, budget - 512 * (response.messages.length - index))));
         const textTruncated = text !== m.text;
-        const message: ReadResult["messages"][number] = { channel: target.channel, ts: m.ts!,
+        const message: ReadResult["messages"][number] = { channel: target.channel, ...display, ts: m.ts!,
           ...(m.thread_ts ? { threadTs: m.thread_ts } : {}),
           author: { userId: m.user ?? null, botId: m.bot_id ?? null, kind: m.bot_id || m.subtype === "bot_message" ? "bot" : m.user ? "participant" : "system" },
           text, textTruncated, ...(Number.isSafeInteger(m.reply_count) && m.reply_count! >= 0 ? { replyCount: m.reply_count } : {}),
@@ -126,6 +129,16 @@ export class SlackReader {
       }
       if (kind === "thread" && !seen.has(target.threadTs!)) unavailable();
       messages.sort((a, b) => timestamp(a.ts) < timestamp(b.ts) ? -1 : timestamp(a.ts) > timestamp(b.ts) ? 1 : 0);
+      await enrichAuthors(client, messages.map(m => m.author), [...this.displaySecrets, actionToken ?? ''], getSlackExecutionSignal(context));
+      // Account for escaped display metadata and reserve the source/status/cursor envelope.
+      let textBudget = limits.maxPageBytes - 2_048 - Buffer.byteLength(JSON.stringify(messages.map(m => ({ ...m, text: '' }))));
+      if (textBudget < 0) unavailable();
+      for (const m of messages) {
+        const text = jsonTextPrefix(m.text, textBudget);
+        if (text !== m.text) { m.textTruncated = true; lossy = true; }
+        m.text = text;
+        textBudget -= Buffer.byteLength(JSON.stringify(text)) - 2;
+      }
       const next = response.response_metadata?.next_cursor?.trim();
       if (actionToken && next?.includes(actionToken)) unavailable();
       if (actionToken && JSON.stringify(messages).includes(actionToken)) unavailable();
@@ -133,18 +146,20 @@ export class SlackReader {
       const page = (previous?.page ?? 0) + 1;
       let nextCursor: string | null = null;
       if (next && (next === cursor || previous?.usedCursors.includes(next))) unavailable();
-      if (next && page < limits.maxPages) {
+      if (next && page < limits.maxPages) nextCursor = randomUUID();
+      const complete = !hasMore && !lossy && (kind !== "thread" || seen.size === rootReplyCount! + 1);
+      const output: ReadResult = { status: "ok", message: complete ? "조회 범위를 모두 읽었습니다." : "부분 조회입니다. 다음 페이지·메시지 잘림·누락 가능성을 확인해주세요.",
+        source: { channel: target.channel, ...display, ...(target.threadTs ? { threadTs: target.threadTs } : {}) },
+        messages, page, nextCursor, complete, truncated: !complete, limits };
+      if (Buffer.byteLength(JSON.stringify(output)) > limits.maxPageBytes) unavailable();
+      if (nextCursor) {
         if (this.cursors.size >= 1000) this.cursors.delete(this.cursors.keys().next().value!);
-        nextCursor = randomUUID();
-        this.cursors.set(nextCursor, { binding, slackCursor: next, page,
+        this.cursors.set(nextCursor, { binding, slackCursor: next!, page,
           rootReplyCount, lossy, seen: [...seen], fingerprints, expires: Date.now() + 10 * 60_000,
-          usedCursors: [...(previous?.usedCursors ?? []), next] });
+          usedCursors: [...(previous?.usedCursors ?? []), next!] });
       }
       if (parsed.data.cursor) this.cursors.delete(parsed.data.cursor);
-      const complete = !hasMore && !lossy && (kind !== "thread" || seen.size === rootReplyCount! + 1);
-      return { status: "ok", message: complete ? "조회 범위를 모두 읽었습니다." : "부분 조회입니다. 다음 페이지·메시지 잘림·누락 가능성을 확인해주세요.",
-        source: { channel: target.channel, ...(target.threadTs ? { threadTs: target.threadTs } : {}) },
-        messages, page, nextCursor, complete, truncated: !complete, limits };
+      return output;
     } catch (error) {
       return errorResult(error);
     }

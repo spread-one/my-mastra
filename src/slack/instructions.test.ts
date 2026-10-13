@@ -79,7 +79,7 @@ describe('exported Slack summary instructions', () => {
   it('prioritizes factual completeness within the byte budget, not response-style shortening', () => {
     for (const rule of [
       'Slack 댓글을 시간순으로 요약한다',
-      '작성자 ID와 이 봇/다른 봇 구분, 논점, 결정, 미해결 질문, 변경 및 의견 충돌을 보존한다',
+      '논점, 결정, 미해결 질문, 변경 및 의견 충돌을 보존한다',
       'root부터 이전 요약 및 새 댓글을 종합한다',
       '답변 스타일을 위해 사실을 생략하거나 의견 충돌을 단일 결론으로 합치지 않는다',
       '바이트 한도 안에서 사실적 완전성을 우선',

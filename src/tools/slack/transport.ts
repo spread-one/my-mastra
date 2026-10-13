@@ -62,6 +62,8 @@ export function scopedSlackClient(client: SlackReadClient, context?: object): Sl
       history: (...args: Parameters<SlackReadClient["conversations"]["history"]>) => call(() => client.conversations.history(...args)),
       replies: (...args: Parameters<SlackReadClient["conversations"]["replies"]>) => call(() => client.conversations.replies(...args)),
     },
+    ...(client.users ? { users: { info: (args: { user: string }) => call(() => client.users!.info(args)) } } : {}),
+    ...(client.bots ? { bots: { info: (args: { bot: string }) => call(() => client.bots!.info(args)) } } : {}),
     ...(client.apiCall ? { apiCall: (...args: Parameters<NonNullable<SlackReadClient["apiCall"]>>) => call(() => client.apiCall!(...args)) } : {}),
   } as SlackReadClient;
   scoped.add(result);

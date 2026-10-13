@@ -30,7 +30,7 @@ export const readOutput = z.object({
   source: z.object({ channel: z.string(), channelName: verifiedChannelName.optional(), threadTs: z.string().optional() }).optional(),
   messages: z.array(z.object({
     channel: z.string(), channelName: verifiedChannelName.optional(), ts: z.string(), threadTs: z.string().optional(),
-    author: z.object({ userId: z.string().nullable(), botId: z.string().nullable(), kind: z.enum(["participant", "bot", "system"]) }),
+    author: z.object({ userId: z.string().nullable(), botId: z.string().nullable(), kind: z.enum(["participant", "bot", "system"]), displayName: z.string().max(160).optional() }),
     text: z.string(), textTruncated: z.boolean(), replyCount: z.number().int().nonnegative().optional(),
     permalink: z.string().optional(), searchMatch: z.boolean().optional(),
     contextForTs: z.string().optional(), contextPosition: z.enum(["before", "after"]).optional(),

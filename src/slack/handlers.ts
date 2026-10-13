@@ -1,4 +1,5 @@
 import { createSlackInvocationContext } from './request.js';
+import { enrichAuthors } from '../tools/slack/display.js';
 import { authorizeCurrentSlackChannel, type SlackReadClient } from '../tools/slack/index.js';
 import { scopedSlackClient } from '../tools/slack/transport.js';
 import { projectFileCandidates, type FileCandidate } from './files.js';
@@ -98,9 +99,16 @@ export function createSlackHandlers(deps: HandlerDeps) {
           const requestContext = createSlackInvocationContext(metadata, signal);
           // Each automatic history page uses the same trusted invocation context and base physical
           // transport, but a fresh operation-local deadline/call budget; no wrapper crosses requests.
-          const threadClient: RepliesClient = deps.readClient ? { conversations: { replies: async args => {
+          let channelName: string | undefined;
+          const display: NonNullable<RepliesClient['display']> = async authors => {
+            if (!deps.readClient) return {};
+            const client = scopedSlackClient(deps.readClient, requestContext);
+            await enrichAuthors(client, authors, invocationSecrets, signal);
+            return channelName ? { channelName } : {};
+          };
+          const threadClient: RepliesClient = deps.readClient ? { display, conversations: { replies: async args => {
             const client = scopedSlackClient(deps.readClient!, requestContext);
-            await authorizeCurrentSlackChannel(client, requestContext);
+            channelName = (await authorizeCurrentSlackChannel(client, requestContext)).channelName;
             return client.conversations.replies(args);
           } } } : deps.client;
           let messages: ChatMessage[];
@@ -118,6 +126,20 @@ export function createSlackHandlers(deps: HandlerDeps) {
             }
             messages = messages.map(m => ({ ...m, content: sanitizeSlackDataMessage(m.content, invocationSecrets) }));
             const current = eventMessage(event.text, event.user, event.current, event.files);
+            if (deps.readClient) {
+              try {
+                channelName = (await authorizeCurrentSlackChannel(scopedSlackClient(deps.readClient, requestContext), requestContext)).channelName;
+                const payload = JSON.parse(current.content);
+                payload.author.botId = null;
+                payload.author.kind = 'participant';
+                const metadata = await display([payload.author]);
+                current.content = JSON.stringify({ ...payload, ...metadata });
+              } catch {
+                // Optional event display must not turn a previously readable authenticated event
+                // into a failed conversation. No metadata lookup after rejected live access.
+                signal.throwIfAborted();
+              }
+            }
             current.content = sanitizeSlackDataMessage(current.content, invocationSecrets);
             while (messages.length && contextBytes([...messages, current]) > limits.contextBytes) messages.splice(0, 2);
             messages.push(current);

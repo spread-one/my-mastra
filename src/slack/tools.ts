@@ -50,7 +50,9 @@ export function createSlackAttachmentAuthorization(base: SlackReadClient): Autho
       const current = await readAuthorizedSlackMessage(client, context, { messageTs, threadTs });
       const after = await authorizeCurrentSlackChannel(client, context);
       signal?.throwIfAborted();
-      if (JSON.stringify(before) !== JSON.stringify(after) || current.channelId !== before.channelId ||
+      const { channelName: _beforeName, ...beforeAuthority } = before;
+      const { channelName: _afterName, ...afterAuthority } = after;
+      if (JSON.stringify(beforeAuthority) !== JSON.stringify(afterAuthority) || current.channelId !== before.channelId ||
           !current.fileIds.includes(fileId)) throw new AttachmentError('ACCESS_DENIED');
       return { file, channelId: current.channelId, messageTs: current.messageTs };
     } catch (error) {
@@ -67,7 +69,8 @@ export function createSlackRuntimeTools(config: SlackConfig, client: SlackReadCl
   // Trusted installed dependency path, never a tool argument. Missing package fails explicitly.
   let pdfModuleURL: string | undefined;
   try { pdfModuleURL = import.meta.resolve('pdfjs-dist/legacy/build/pdf.mjs'); } catch { /* PDF_UNAVAILABLE */ }
-  const tools: ExtraTools = { ...createSlackTools(client),
+  const displaySecrets = [config.botToken, config.appToken, config.deepseekApiKey, config.exaApiKey, config.vision?.apiKey].filter((s): s is string => !!s);
+  const tools: ExtraTools = { ...createSlackTools(client, displaySecrets),
     ...createAttachmentTools({ authorize, botToken: config.botToken, parserOptions: { pdfModuleURL }, downloadDependencies: transport.downloadDependencies }),
     ...createImageTools({ authorize, botToken: config.botToken, vision: config.vision, downloadDependencies: transport.downloadDependencies, visionDependencies: transport.visionDependencies }) };
   for (const [name, tool] of Object.entries(tools)) {
