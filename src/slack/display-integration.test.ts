@@ -80,12 +80,12 @@ describe('human-readable Slack registered runtime integration (synthetic SDK, no
     for (const release of releases) release({ ok: false, error: 'late' });
     await vi.advanceTimersByTimeAsync(0);
   });
-  it('never enriches before origin or target access is accepted', async () => {
+  it('never enriches when live origin access is denied', async () => {
     const f = fixture({ denied: true }), tools = createSlackRuntimeTools(config, f.client);
     const result: any = await tools.slack_read_thread!.execute!({ channel: 'C2', ts: root }, { requestContext: invocation() } as never);
     expect(result.status).toBe('access_denied'); expect(f.calls).not.toContain('users.info'); expect(f.calls).not.toContain('bots.info');
   });
-  it('enriches automatic authoritative thread in native roles, preserves IDs/raw text, counts final JSON and saves only accepted answers', async () => {
+  it('enriches automatic authoritative channel thread in native roles, preserves IDs/raw text, counts final JSON and delivers one answer', async () => {
     const f = fixture(), chat = vi.fn(async (_messages: ChatMessage[]) => '**요약**');
     const post = vi.fn(async () => ({ ok: true }));
     const handlers = createSlackHandlers({ readClient: f.client, secrets: [config.deepseekApiKey], chat, summarize: async () => '요약', client: { chat: { postMessage: post }, conversations: { replies: async () => { throw new Error('raw read'); } } } });
@@ -102,7 +102,7 @@ describe('human-readable Slack registered runtime integration (synthetic SDK, no
     expect(contextBytes(messages)).toBeLessThanOrEqual(48000);
     expect(post).toHaveBeenCalledOnce(); await handlers.shutdown();
   });
-  it('does not regress event-only delivery/history when optional live display access is unavailable', async () => {
+  it('preserves event-only delivery when optional live display access is unavailable', async () => {
     const f = fixture({ denied: true }), chat = vi.fn(async () => '정상 응답');
     const post = vi.fn(async () => ({ ok: true }));
     const handlers = createSlackHandlers({ readClient: f.client, chat, summarize: async () => '요약', client: { chat: { postMessage: post }, conversations: { replies: async () => ({}) } } });
