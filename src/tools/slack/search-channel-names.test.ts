@@ -117,7 +117,7 @@ describe("live verified display-only search channel names (synthetic)", () => {
       expect(rawAuthorityReads.slice(-10)).toEqual(["id", "context_team_id", "is_channel", "is_private", "is_group", "is_im", "is_mpim", "is_ext_shared", "is_org_shared", "is_shared"]);
     }
   });
-  it("preserves full-thread membership denial with a verified name and does not add thread channelName support", async () => {
+  it("preserves full-thread membership denial and displays the verified name after success", async () => {
     const f = fixture();
     f.members.mockImplementation(async ({ channel }: { channel: string }) => ({ ok: true, members: channel === "C1" ? ["U1"] : [] }));
     expect(await f.reader.read("thread", { channel: "C2", ts: ts(1) }, f.context)).toMatchObject({ status: "access_denied", messages: [] });
@@ -125,8 +125,8 @@ describe("live verified display-only search channel names (synthetic)", () => {
     f.members.mockResolvedValue({ ok: true, members: ["U1"] });
     f.replies.mockResolvedValue({ ok: true, messages: [{ ts: ts(1), text: "root" }] });
     const result = await f.reader.read("thread", { channel: "C2", ts: ts(1) }, f.context);
-    expect(result).toMatchObject({ status: "ok", source: { channel: "C2", threadTs: ts(1) } });
-    expect(result.source).not.toHaveProperty("channelName"); expect(result.messages[0]!).not.toHaveProperty("channelName");
+    expect(result).toMatchObject({ status: "ok", source: { channel: "C2", threadTs: ts(1), channelName: "verified-C2" } });
+    expect(result.messages[0]!).toHaveProperty("channelName", "verified-C2");
   });
   it("does not inspect even an own name until raw authority succeeds", async () => {
     const forbidden = vi.fn(() => { throw new Error("denied name must not be read"); });

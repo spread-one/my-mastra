@@ -1,9 +1,10 @@
 import { scopedSlackClient } from "./transport.js";
+import { displayName, enrichAuthors } from './display.js';
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { SlackReadClient } from "./client.js";
 import { authorizeCurrentSlackChannel, requireSlackReadIdentity } from "./authorization.js";
-import { getSlackSearchActionToken } from "./context.js";
+import { getSlackExecutionSignal, getSlackSearchActionToken } from "./context.js";
 import { check, deny, errorResult, failure, invalid, unavailable } from "./errors.js";
 import { publicChannelId, searchInput, type ReadResult } from "./schemas.js";
 import { jsonTextPrefix } from "./projection.js";
@@ -130,7 +131,7 @@ function normalizeSearchPermalink(url: URL, permalink: string, workspaceHost: st
 export class SlackSearcher {
   private readonly cursors = new Map<string, State>();
   private readonly inFlight = new Set<string>();
-  constructor(private readonly client: SlackReadClient) {}
+  constructor(private readonly client: SlackReadClient, private readonly displaySecrets: readonly string[] = []) {}
   async search(input: unknown, context?: object): Promise<ReadResult> {
     let locked: string | undefined;
     try {
@@ -160,7 +161,7 @@ export class SlackSearcher {
         if (verified.size >= 20) unavailable();
         const { name } = await verifyPublicSlackChannel(client, access, id);
         // Display only, page-local and token-safe; never enters binding/identity/hash state.
-        verified.set(id, name?.includes(actionToken) ? undefined : name);
+        verified.set(id, name?.includes(actionToken) ? undefined : displayName(name, this.displaySecrets));
       };
       const display = (id: string) => {
         const channelName = verified.get(id);
@@ -306,6 +307,7 @@ export class SlackSearcher {
         message: complete ? `${channel ? "지정한 공개 채널" : "워크스페이스 공개 채널"}의 키워드 검색 범위를 확인했습니다 (전체 기록이 아닙니다).` : "부분 검색 결과입니다. 다음 페이지와 본문 잘림 및 context 생략(대체 표현 포함)을 확인해주세요.",
         messages: items, page, nextCursor, complete, truncated: !complete, limits: { ...limits, pageSize: limit },
       });
+      await enrichAuthors(client, messages.map(m => m.author), [...this.displaySecrets, actionToken], getSlackExecutionSignal(context));
       const primaryCount = messages.filter(m => m.searchMatch).length;
       // Reserve the ACTUAL JSON envelope: commas, brackets, limits, source, cursor,
       // Korean status text and boolean spellings. Both completion branches are covered.

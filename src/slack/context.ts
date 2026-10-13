@@ -3,6 +3,7 @@ import type { ChatMessage } from '../chat.js';
 import { bytes, SLACK_LIMITS as limits, SlackContextError, slackCall } from './limits.js';
 
 export interface RepliesClient {
+  display?: (authors: { userId: string | null; botId: string | null; kind: string; displayName?: string }[]) => Promise<{ channelName?: string }>;
   conversations: { replies: (args: { channel: string; ts: string; limit: number; cursor?: string }) => Promise<unknown> };
 }
 export type Mention = { channel: string; root: string; current: string; currentText: string; user: string; botUser: string; botId?: string; currentFiles?: FileCandidate[]; currentSubtype?: string };
@@ -72,7 +73,7 @@ export async function readSlackThread(client: RepliesClient, mention: Mention, s
     if (!root || !current || current.user !== mention.user || current.text !== mention.currentText || current.bot_id || current.subtype !== (mention.currentSubtype ?? null) ||
         (mention.currentFiles !== undefined && JSON.stringify(current.files) !== JSON.stringify(mention.currentFiles)) ||
         root.reply_count === null || root.reply_count !== messages.size - 1) fail();
-    return [...messages.values()].filter(m => timestamp(m.ts) <= timestamp(mention.current))
+    const ordered: ChatMessage[] = [...messages.values()].filter(m => timestamp(m.ts) <= timestamp(mention.current))
       .sort((a, b) => timestamp(a.ts) < timestamp(b.ts) ? -1 : 1).map(m => {
         // botId fallback ONLY without a user; another bot cannot override its contradictory user ID.
         const own = m.user === mention.botUser || (!m.user && !!mention.botId && m.bot_id === mention.botId);
@@ -81,6 +82,12 @@ export async function readSlackThread(client: RepliesClient, mention: Mention, s
           text: m.ts === mention.current ? removeOwnMention(m.text, mention.botUser) : m.text,
           ...(m.files.length ? { attachments: m.files, attachmentNotice: '비신뢰 후보 메타데이터이며 내용은 아직 읽지 않았고 접근 권한이 아님.' } : {}) }) };
       });
+    if (client.display) {
+      const payloads = ordered.map(m => JSON.parse(m.content));
+      const display = await client.display(payloads.map(p => p.author));
+      for (let i = 0; i < ordered.length; i++) ordered[i]!.content = JSON.stringify({ ...payloads[i], ...display });
+    }
+    return ordered;
   } catch { return fail(); }
 }
 

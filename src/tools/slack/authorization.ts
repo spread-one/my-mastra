@@ -1,4 +1,5 @@
 import { types } from "node:util";
+import { displayField, displayName } from './display.js';
 import { scopedSlackClient } from "./transport.js";
 import type { SlackReadClient } from "./client.js";
 import { isSlackReadScopeTs, getSlackSearchActionToken, getSlackReadIdentity, type SlackReadIdentity } from "./context.js";
@@ -13,7 +14,7 @@ export function requireSlackReadIdentity(context?: object): SlackReadIdentity {
 }
 export type CurrentSlackAccess = Readonly<{
   identity: SlackReadIdentity; channelId: string; kind: "public_channel" | "private_channel" | "im";
-  workspaceHost?: string;
+  workspaceHost?: string; channelName?: string;
 }>;
 /** Live check for EACH operation/page; the return value is not a reusable access capability. */
 export async function authorizeCurrentSlackChannel(
@@ -36,9 +37,10 @@ export async function authorizeCurrentSlackChannel(
     const channel = info.channel as (NonNullable<typeof info.channel> & { user?: string }) | undefined;
     if (!channel || channel.id !== id || (channel.context_team_id && channel.context_team_id !== identity.teamId) ||
         channel.is_ext_shared || channel.is_org_shared || channel.is_shared) deny();
+    const channelName = () => displayName(displayField(channel, 'name'), [getSlackSearchActionToken(context) ?? '']);
     if (id.startsWith("D")) {
       if (!channel.is_im || channel.user !== identity.userId) deny();
-      return Object.freeze({ identity, channelId: id, kind: "im", workspaceHost });
+      return Object.freeze({ identity, channelId: id, kind: "im", workspaceHost, channelName: channelName() });
     }
     if (!(channel.is_channel || channel.is_group) || channel.is_im || channel.is_mpim) deny();
     let cursor: string | undefined;
@@ -49,7 +51,7 @@ export async function authorizeCurrentSlackChannel(
       if (!Array.isArray(members.members) || members.members.length > 200 ||
           members.members.some(member => !/^[UW][A-Z0-9]{1,63}$/.test(member))) unavailable();
       if (members.members.includes(identity.userId)) return Object.freeze({ identity, channelId: id,
-        kind: channel.is_private === false && !channel.is_group ? "public_channel" : "private_channel", workspaceHost });
+        kind: channel.is_private === false && !channel.is_group ? "public_channel" : "private_channel", workspaceHost, channelName: channelName() });
       const next = members.response_metadata?.next_cursor?.trim();
       if (!next || seen.has(next)) deny();
       seen.add(next); cursor = next;

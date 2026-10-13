@@ -6,6 +6,12 @@ The original checkout is not modified. The library foundation is now wired into 
 It does not implement cancellation commands, OAuth, auto-join, fallback history scans,
 attachment downloads, or privileged alternate credentials.
 
+## Optional human-readable context
+
+Automatic context and registered channel/thread/search tools add optional `channelName` and `author.displayName` only after live access validation. Channel names reuse validated `conversations.info`; authors use the same installed bot credential's `users.info`, or `bots.info` only when no user author exists. No email, arbitrary profile fields, persistent cache or permission grant is retained. User names prefer inspected primitive profile `display_name`, `real_name`, then `name`; missing/unsafe metadata uses generic participant/bot wording, never guessed roles or names.
+
+Each enrichment batch has at most eight unique author lookups, two concurrent requests and an 800 ms display deadline. Late results are discarded; physical SDK requests remain bounded by no-retry transport timeout. Accessors/proxies are not executed. Redacted, JSON-escaped names count toward final whole-context/tool JSON budgets. IDs remain API addresses and authorization evidence, not unsolicited normal-answer diagnostics. Meaningful partial-reading limitations remain natural-language caveats. The manifest adds bot `users:read`; existing installations still require manual reinstall/reapproval. No installation or live Slack/provider checks were performed.
+
 ## Integration API
 
 Import from `src/tools/slack/index.ts` (compiled `dist/tools/slack/index.js`).
