@@ -30,20 +30,20 @@ async function verifiedPublicChannel(client: SlackReadClient, origin: CurrentSla
     if (!channel || channel.id !== id || channel.context_team_id !== origin.identity.teamId ||
         channel.is_channel !== true || channel.is_private !== false || channel.is_group !== false ||
         channel.is_im || channel.is_mpim || channel.is_ext_shared || channel.is_org_shared || channel.is_shared) deny();
-    return channel;
+    return { channel }; // Never return a raw object through Promise thenable assimilation.
   } catch (error) { throw new SlackReadAccessError(errorResult(error)); }
 }
 
 /** Search access is native RTS-filtered; public provenance validation precedes optional metadata. */
 export async function verifyPublicSlackChannel(client: SlackReadClient, origin: CurrentSlackAccess, id: string): Promise<{ name?: string }> {
-  return channelDisplayMetadata(await verifiedPublicChannel(client, origin, id));
+  return channelDisplayMetadata((await verifiedPublicChannel(client, origin, id)).channel);
 }
 
 /** Conservative bot-native full-thread policy, separate from native RTS search permission.
  * Live bounded requester membership on EVERY page; no snippets/capabilities/auto-join fallback.
  */
 export async function authorizePublicSlackThread(client: SlackReadClient, origin: CurrentSlackAccess, id: string): Promise<{ name?: string }> {
-  const channel = await verifiedPublicChannel(client, origin, id);
+  const { channel } = await verifiedPublicChannel(client, origin, id);
   try {
     let cursor: string | undefined;
     const seen = new Set<string>();
